@@ -1,0 +1,7 @@
+.shadow-cljs/
+node_modules/
+target/
+.lein-repl-history
+.cpcache/
+checkouts/
+bin/
