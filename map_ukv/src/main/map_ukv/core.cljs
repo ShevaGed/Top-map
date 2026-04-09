@@ -12,20 +12,27 @@
       (.then (fn [data]
                (let [results (.-results data)
                      first-res (aget results 0)
-                     elevation (.-elevation first-res)]
-                 
-                 ;; --- НОВА ЛОГІКА ВИДАЛЕННЯ ---
-                 (when-let [old-marker @last-marker]
-                   (.remove old-marker)) ; Видаляємо старий маркер з карти
-                 ;; ----------------------------
+                     elevation (.-elevation first-res)
+                     antenna-h 10] ;; Давай поки зафіксуємо висоту антени 10м
 
-                 (let [new-marker (-> (.marker js/L (clj->js [lat lng]))
-                                      (.addTo my-map)
-                                      (.bindPopup (str "<b>Висота:</b> " elevation " м"))
-                                      (.openPopup))]
-                   
-                   ;; Запам'ятовуємо новий маркер у наш атом
-                   (reset! last-marker new-marker)))))))
+                 ;; --- Оце наш новий крок: СТУКАЄМО НА БЕКЕНД ---
+                 (-> (js/fetch (str "http://localhost:3000/calculate?lat=" lat 
+                                    "&lon=" lng 
+                                    "&h=" antenna-h 
+                                    "&elevation=" elevation))
+                     (.then (fn [res] (.text res))) ;; Отримуємо текстову відповідь
+                     (.then (fn [calc-result]
+                              ;; Виводимо результат розрахунку в консоль або в бабл
+                              (js/console.log "Результат з бекенду:" calc-result)
+                              
+                              ;; Оновлюємо маркер, щоб він показував результат розрахунку
+                              (when-let [old-marker @last-marker] (.remove old-marker))
+                              (let [new-marker (-> (.marker js/L (clj->js [lat lng]))
+                                                   (.addTo my-map)
+                                                   (.bindPopup (str "<b>Рельєф:</b> " elevation " м<br>"
+                                                                    "<b>Розрахунок:</b><br>" calc-result))
+                                                   (.openPopup))]
+                                (reset! last-marker new-marker))))))))))
 
 
 (defn init []
