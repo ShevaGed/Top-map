@@ -1,63 +1,124 @@
 (ns map-ukv.core
-  (:require ["leaflet" :as L])) ;; Підключаємо встановлену через npm бібліотеку
+  (:require ["leaflet" :as L]))
 
-;; Створюємо "коробку" для карти, щоб мати до неї доступ з будь-якої функції
 (defonce map-state (atom nil))
+(defonce last-marker (atom nil))
+(defonce rays-group (atom nil)) ; Група для всіх ліній «зірки»
+(defonce antenna-pos (atom nil))
 
-(defonce last-marker (atom nil)) ; Спочатку тут порожньо (nil)
 
-(defn get-elevation [lat lng my-map]
-  (-> (js/fetch (str "https://api.open-elevation.com/api/v1/lookup?locations=" lat "," lng))
-      (.then (fn [response] (.json response)))
-      (.then (fn [data]
-               (let [results (.-results data)
-                     first-res (aget results 0)
-                     elevation (.-elevation first-res)
-                     antenna-h 10] ;; Давай поки зафіксуємо висоту антени 10м
+(defn flatten-all-rays [rays]
+  (apply concat rays))
 
-                 ;; --- Оце наш новий крок: СТУКАЄМО НА БЕКЕНД ---
-                 (-> (js/fetch (str "http://localhost:3000/calculate?lat=" lat 
-                                    "&lon=" lng 
-                                    "&h=" antenna-h 
-                                    "&elevation=" elevation))
-                     (.then (fn [res] (.text res))) ;; Отримуємо текстову відповідь
-                     (.then (fn [calc-result]
-                              ;; Виводимо результат розрахунку в консоль або в бабл
-                              (js/console.log "Результат з бекенду:" calc-result)
-                              
-                              ;; Оновлюємо маркер, щоб він показував результат розрахунку
-                              (when-let [old-marker @last-marker] (.remove old-marker))
-                              (let [new-marker (-> (.marker js/L (clj->js [lat lng]))
-                                                   (.addTo my-map)
-                                                   (.bindPopup (str "<b>Рельєф:</b> " elevation " м<br>"
-                                                                    "<b>Розрахунок:</b><br>" calc-result))
-                                                   (.openPopup))]
-                                (reset! last-marker new-marker))))))))))
+;; Функція для розрахунку точки на відстані та під кутом
+;; Виправлена функція для розрахунку координат
+(defn destination-point [lat lng distance-km bearing-deg]
+  (let [radius 6371
+        ;; Перетворюємо градуси в радіани вручну
+        bearing (* bearing-deg (/ js/Math.PI 180))
+        lat-rad (* lat (/ js/Math.PI 180))
+        lng-rad (* lng (/ js/Math.PI 180))
+        
+        dest-lat-rad (js/Math.asin (+ (* (js/Math.sin lat-rad) (js/Math.cos (/ distance-km radius)))
+                                      (* (js/Math.cos lat-rad) (js/Math.sin (/ distance-km radius)) (js/Math.cos bearing))))
+        
+        dest-lng-rad (+ lng-rad (js/Math.atan2 (* (js/Math.sin bearing) (js/Math.sin (/ distance-km radius)) (js/Math.cos lat-rad))
+                                               (- (js/Math.cos (/ distance-km radius)) 
+                                                  (* (js/Math.sin lat-rad) (js/Math.sin dest-lat-rad)))))]
+    
+    ;; Повертаємо назад у градуси
+    [(* dest-lat-rad (/ 180 js/Math.PI)) 
+     (* dest-lng-rad (/ 180 js/Math.PI))]))
 
+(defn interpolate-points [p1 p2 steps]
+  (let [[lat1 lng1] p1
+        [lat2 lng2] p2]
+    (map (fn [i]
+           (let [fraction (/ i steps)]
+             [(+ lat1 (* fraction (- lat2 lat1)))
+              (+ lng1 (* fraction (- lng2 lng1)))]))
+         (range (inc steps)))))
+
+(defn fetch-ray-visibility [path-points h]
+  (let [body-api (clj->js {:locations (map (fn [[lat lng]] {:latitude lat :longitude lng}) path-points)})]
+    (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
+                  (clj->js {:method "POST" :headers {"Content-Type" "application/json"} :body (js/JSON.stringify body-api)}))
+        (.then (fn [res] (.json res)))
+        (.then (fn [data]
+                 (let [elevations (map #(.-elevation %) (.-results data))]
+                   (-> (js/fetch "http://localhost:3000/check-profile"
+                                 (clj->js {:method "POST"
+                                           :headers {"Content-Type" "application/json"}
+                                           :body (js/JSON.stringify (clj->js {:elevations elevations :h1 h :h2 h}))}))
+                       (.then (fn [res] (.json res)))
+                       (.then (fn [result]
+                                (let [res-clj (js->clj result :keywordize-keys true)
+                                      is-visible (every? :visible res-clj)
+                                      ;; Малюємо цей конкретный промінь
+                                      p1 (first path-points)
+                                      p2 (last path-points)
+                                      line (L/polyline (clj->js [p1 p2]) 
+                                                       (clj->js {:color (if is-visible "green" "red") 
+                                                                 :weight 2 
+                                                                 :opacity 0.6}))]
+                                  (.addTo line @rays-group)))))))))))
+
+(defn handle-map-click [lat lng my-map]
+  (when @rays-group (.clearLayers @rays-group))
+  (when-let [m @last-marker] (.remove m))
+  
+  (let [m (-> (.marker js/L (clj->js [lat lng])) (.addTo my-map))
+        h-base (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
+        h-user 1.5 ; Висота рації в руках людини
+        dist 20
+        angles (range 0 360 10) ; 36 променів для густішої сітки
+        all-rays (map (fn [angle] 
+                        (interpolate-points [lat lng] (destination-point lat lng dist angle) 20)) 
+                      angles)
+        flat-points (apply concat all-rays)]
+    
+    (reset! last-marker m)
+    (js/console.log "Сканую зону покриття (h1:" h-base "м, h2:" h-user "м)...")
+
+    (let [body-api (clj->js {:locations (map (fn [[la ln]] {:latitude la :longitude ln}) flat-points)})]
+      (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
+                    (clj->js {:method "POST" 
+                              :headers {"Content-Type" "application/json"} 
+                              :body (js/JSON.stringify body-api)}))
+          (.then (fn [res] (.json res)))
+          (.then (fn [data]
+                   (let [all-elevations (map #(.-elevation %) (.-results data))
+                         ;; Важливо: 21 точка на кожен промінь
+                         chunked-elevs (partition 21 all-elevations)]
+                     
+                     (doseq [[idx elevs] (map-indexed vector chunked-elevs)]
+                       (let [path (nth all-rays idx)]
+                         (-> (js/fetch "http://localhost:3000/check-profile"
+                                       (clj->js {:method "POST"
+                                                 :headers {"Content-Type" "application/json"}
+                                                 ;; Відправляємо різні висоти антен
+                                                 :body (js/JSON.stringify (clj->js {:elevations elevs 
+                                                                                   :h1 h-base 
+                                                                                   :h2 h-user}))}))
+                             (.then (fn [res] (.json res)))
+                             (.then (fn [result]
+                                      (let [res-clj (js->clj result :keywordize-keys true)
+                                            is-visible (every? :visible res-clj)
+                                            line (L/polyline (clj->js [(first path) (last path)]) 
+                                                             (clj->js {:color (if is-visible "#2ecc71" "#e74c3c") 
+                                                                       :weight 2 
+                                                                       :opacity 0.5}))]
+                                        (.addTo line @rays-group))))))))))))))
 
 (defn init []
-  (let [ ;; 1. Створюємо об'єкт карти і прив'язуємо до нашого div
-        my-map (.map L "map-id")
-        ;; 2. Шлях до карти OpenTopoMap
+  (let [my-map (.map L "map-id")
         topo-url "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
-        ;; 3. Налаштування (авторство та масштаб)
-        options (clj->js {:maxZoom 17
-                          :attribution "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)"})]
-    
-    ;; Встановлюємо початкову точку (наприклад, Київ) і масштаб 10
+        options (clj->js {:maxZoom 17 :attribution "OpenTopoMap"})]
     (.setView my-map (clj->js [50.45 30.52]) 10)
-    
-    ;; Додаємо шар карти до нашого об'єкта
     (.addTo (.tileLayer L topo-url options) my-map)
-
-    ;; Додаємо "слухача" подій на клік
-    (.on my-map "click" 
-         (fn [event]
-           (let [lat (.. event -latlng -lat)
-                 lng (.. event -latlng -lng)]
-             (get-elevation lat lng my-map)))) ;; Викликаємо запит висоти
     
-    ;; Зберігаємо карту в атом
-    (reset! map-state my-map)
+    ;; Створюємо групу для променів
+    (reset! rays-group (-> (.layerGroup L) (.addTo my-map)))
     
-    (js/console.log "Map-ukv успішно запущена!")))
+    (.on my-map "click" (fn [e] (handle-map-click (.. e -latlng -lat) (.. e -latlng -lng) my-map)))
+    (reset! map-state my-map)))

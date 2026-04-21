@@ -6,7 +6,8 @@
   :dependencies [[org.clojure/clojure "1.12.2"]
                  [ring/ring-core "1.10.0"]
                  [ring/ring-jetty-adapter "1.10.0"]
-                 [metosin/reitit "0.5.18"]]
+                 [metosin/reitit "0.5.18"]
+                 [cheshire "5.10.0"]]
   :main ^:skip-aot antenna-server.core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all
