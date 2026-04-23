@@ -8,18 +8,34 @@
   (if (and (seq elevations) h1 h2)
     (let [n (count elevations)
           e-list (map double elevations)
+          dist-total 40000.0 ; Припустимо 40 км для розрахунку кривизни
+          step-dist (/ dist-total (max 1 (dec n)))
+          
+          ;; Коефіцієнт 4/3 для врахування рефракції (атмосфера "притискає" хвилю)
+          k 1.33
+          earth-radius (* 6371000.0 k) 
+          
           start-h (+ (first e-list) (double h1))
           end-h (+ (last e-list) (double h2))
           step-h (/ (- end-h start-h) (max 1 (dec n)))]
+      
       (map-indexed (fn [idx ground-h]
-                     (let [ray-h (+ start-h (* idx step-h))]
-                       {:ground ground-h
-                        :ray ray-h
-                        :visible (> ray-h ground-h)}))
+                     (let [ray-h (+ start-h (* idx step-h))
+                           ;; Розрахунок просідання променя через кривизну Землі
+                           distance-from-start (* idx step-dist)
+                           distance-from-end (- dist-total distance-from-start)
+                           drop-m (/ (* distance-from-start distance-from-end) 
+                                     (* 2 earth-radius))
+                           
+                           effective-ray-h (- ray-h drop-m)
+                           ;; Додаємо 4 метри "запасу" на дифракцію (огинання)
+                           is-visible (> (+ effective-ray-h 4.0) ground-h)]
+                       {:dist idx
+                        :ground ground-h
+                        :ray effective-ray-h
+                        :visible is-visible}))
                    e-list))
-    (do
-      (println "ПОМИЛКА: Неповні дані" {:elevations (count elevations) :h1 h1 :h2 h2})
-      [])))
+    []))
 
 ;; 2. Головний обробник запитів
 (defn handler [request]

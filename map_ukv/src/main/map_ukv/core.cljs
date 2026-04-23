@@ -63,22 +63,27 @@
                                                                  :opacity 0.6}))]
                                   (.addTo line @rays-group)))))))))))
 
+;; Допоміжна функція: залишає тільки точки до першої перешкоди
+(defn get-visible-segment [points-info]
+  (take-while :visible points-info))
+
 (defn handle-map-click [lat lng my-map]
   (when @rays-group (.clearLayers @rays-group))
   (when-let [m @last-marker] (.remove m))
   
   (let [m (-> (.marker js/L (clj->js [lat lng])) (.addTo my-map))
-        h-base (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
-        h-user 1.5 ; Висота рації в руках людини
-        dist 20
-        angles (range 0 360 10) ; 36 променів для густішої сітки
-        all-rays (map (fn [angle] 
-                        (interpolate-points [lat lng] (destination-point lat lng dist angle) 20)) 
-                      angles)
-        flat-points (apply concat all-rays)]
+      h-base (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
+      h-user 1.5 
+      dist 45 ; Збільшуємо до 45 км
+      angles (range 0 360 3) ; Крок 3 градуси (120 променів) - баланс точності та швидкості
+      ;; Збільшуємо кількість точок на промені до 50 для дальніх дистанцій
+      all-rays (map (fn [angle] 
+                      (interpolate-points [lat lng] (destination-point lat lng dist angle) 50)) 
+                    angles)
+      flat-points (apply concat all-rays)]
     
     (reset! last-marker m)
-    (js/console.log "Сканую зону покриття (h1:" h-base "м, h2:" h-user "м)...")
+    (js/console.log "Будую полігон покриття...")
 
     (let [body-api (clj->js {:locations (map (fn [[la ln]] {:latitude la :longitude ln}) flat-points)})]
       (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
@@ -88,27 +93,32 @@
           (.then (fn [res] (.json res)))
           (.then (fn [data]
                    (let [all-elevations (map #(.-elevation %) (.-results data))
-                         ;; Важливо: 21 точка на кожен промінь
-                         chunked-elevs (partition 21 all-elevations)]
+                         chunked-elevs (partition 51 all-elevations)
+                         boundary-points (atom [])]
                      
                      (doseq [[idx elevs] (map-indexed vector chunked-elevs)]
                        (let [path (nth all-rays idx)]
                          (-> (js/fetch "http://localhost:3000/check-profile"
                                        (clj->js {:method "POST"
                                                  :headers {"Content-Type" "application/json"}
-                                                 ;; Відправляємо різні висоти антен
-                                                 :body (js/JSON.stringify (clj->js {:elevations elevs 
-                                                                                   :h1 h-base 
-                                                                                   :h2 h-user}))}))
+                                                 :body (js/JSON.stringify (clj->js {:elevations elevs :h1 h-base :h2 h-user}))}))
                              (.then (fn [res] (.json res)))
                              (.then (fn [result]
                                       (let [res-clj (js->clj result :keywordize-keys true)
-                                            is-visible (every? :visible res-clj)
-                                            line (L/polyline (clj->js [(first path) (last path)]) 
-                                                             (clj->js {:color (if is-visible "#2ecc71" "#e74c3c") 
-                                                                       :weight 2 
-                                                                       :opacity 0.5}))]
-                                        (.addTo line @rays-group))))))))))))))
+                                            visible-part (get-visible-segment res-clj)
+                                            last-visible-idx (max 0 (dec (count visible-part)))
+                                            edge-point (nth path last-visible-idx)]
+                                        
+                                        (swap! boundary-points conj edge-point)
+                                        
+                                        (when (= (count @boundary-points) (count angles))
+                                          (let [polygon-points (clj->js (concat [[lat lng]] @boundary-points))
+                                                poly (L/polygon polygon-points 
+                                                                (clj->js {:color "#3388ff" 
+                                                                          :fillColor "#3388ff"
+                                                                          :fillOpacity 0.4
+                                                                          :weight 2}))]
+                                            (.addTo poly @rays-group))))))))))))))))
 
 (defn init []
   (let [my-map (.map L "map-id")
