@@ -31,10 +31,21 @@
     </div>
 
     <button id="clear-btn" class="btn-danger">🗑 Очистити карту</button>
+
+    <button id="export-btn" class="btn btn-success">Експорт JSON</button>
+    
     
     <div id="loader" class="loader-container">
         <div class="spinner"></div>
         <span>Обробка рельєфу...</span>
+    </div>
+
+    <div class="input-group">
+    <label>📡 Діапазон</label>
+    <select id="freq-select">
+        <option value="140">VHF (140 MHz)</option>
+        <option value="440">UHF (440 MHz)</option>
+    </select>
     </div>
  </div>
 

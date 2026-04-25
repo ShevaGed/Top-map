@@ -5,9 +5,11 @@
 (defonce last-marker (atom nil))
 (defonce rays-group (atom nil)) ; Група для всіх ліній «зірки»
 (defonce antenna-pos (atom nil))
+(defonce legend-ui (atom nil))
+(defonce boundary-points (atom {}))
 
 (def antenna-icon 
-  (.icon js/L (clj->js {:iconUrl "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMyYzNlNTAiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMTIgMkwxMiAxMk0xMiAxMkw3IDIyTTEyIDEyTDE3IDIyTTkgMTJoNk0xMCA5aDRNMTEgNmg2Ii8+PC9zdmc+"
+  (.icon js/L (clj->js {:iconUrl "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMyYzNlNTAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0xMiAyTDEyIDUuNU0xMiAyMkwxMiAxMk0xMiAxMkw3IDIyTTEyIDEyTDE3IDIyTTEwIDhoNE04IDExaDhNMTEuNSAyaDEiLz48L3N2Zz4="
                         :iconSize [40 40]
                         :iconAnchor [20 40]
                         :className "antenna-icon-svg"})))
@@ -72,86 +74,129 @@
 (defn get-visible-segment [points-info]
   (take-while :visible points-info))
 
+(defn update-legend-ui [freq h-base h-user]
+  (let [legend-div (js/document.getElementById "dynamic-legend")]
+    (when legend-div
+      (set! (.-innerHTML legend-div) 
+            (str "<div style='text-align:center;'>
+                    <strong style='color:#2c3e50;'>Поточні параметри</strong><br>
+                    <div style='margin:5px 0;'>
+                       <span style='background:#3498db; color:white; padding:2px 6px; border-radius:3px; font-size:12px; font-weight:bold;'>" 
+                       freq " MHz</span>
+                    </div>
+                    <small style='color:#7f8c8d;'>Щогла: " h-base "м | Приймач: " h-user "м</small>
+                  </div>")))))
+
+
 (defn handle-map-click [lat lng my-map]
   (let [h-base (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
         h-user (js/parseFloat (.-value (js/document.getElementById "user-height")))
         dist   (js/parseFloat (.-value (js/document.getElementById "scan-dist")))
+        freq   (js/parseInt (.-value (js/document.getElementById "freq-select")))
         loader (js/document.getElementById "loader")
-        ;; Чим більше дистанція, тим більше точок нам треба для точності
-        num-points (if (> dist 30) 50 30)]
+        num-points 50]
     
-    ;; 1. Візуальна підготовка
-    (when @rays-group (.clearLayers @rays-group))
-    (when-let [m @last-marker] (.remove m))
-    (reset! last-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon})) 
-                            (.addTo my-map)))
-    
-    ;; 2. Показуємо лоадер
     (set! (.-display (.-style loader)) "block")
-    (js/console.log (str "Сканування: " dist "км, щогла " h-base "м, рація " h-user "м"))
+    (.clearLayers @rays-group)
+    (reset! boundary-points {})
 
-    (let [angles (range 0 360 3) ; 120 променів для гарного полігону
-          all-rays (map (fn [angle] 
-                          (interpolate-points [lat lng] (destination-point lat lng dist angle) num-points)) 
-                        angles)
-          flat-points (apply concat all-rays)]
+    (when @last-marker (.remove @last-marker))
 
-      (let [body-api (clj->js {:locations (map (fn [[la ln]] {:latitude la :longitude ln}) flat-points)})]
+    (reset! last-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon})) 
+                           (.addTo my-map)))
+
+    (let [angles (range 0 361 5)
+          angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist a) num-points)]) angles))
+          flat-locations (map (fn [[la ln]] {:latitude la :longitude ln}) 
+                                (apply concat (map #(get angle-map %) angles)))]
+        
         (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
                       (clj->js {:method "POST" 
                                 :headers {"Content-Type" "application/json"} 
-                                :body (js/JSON.stringify body-api)}))
+                                :body (js/JSON.stringify (clj->js {:locations flat-locations}))}))
             (.then (fn [res] (.json res)))
             (.then (fn [data]
                      (let [all-elevations (map #(.-elevation %) (.-results data))
-                           chunked-elevs (partition (inc num-points) all-elevations)
-                           boundary-points (atom [])]
+                           chunked-elevs (partition (inc num-points) all-elevations)]
                        
                        (doseq [[idx elevs] (map-indexed vector chunked-elevs)]
-                         (let [path (nth all-rays idx)]
+                         (let [angle (nth angles idx)
+                               path  (get angle-map angle)]
+                           
                            (-> (js/fetch "http://localhost:3000/check-profile"
                                          (clj->js {:method "POST"
                                                    :headers {"Content-Type" "application/json"}
-                                                   :body (js/JSON.stringify (clj->js {:elevations elevs 
-                                                                                     :h1 h-base 
-                                                                                     :h2 h-user}))}))
+                                                   :body (js/JSON.stringify (clj->js {:elevations elevs :h1 h-base :h2 h-user :freq freq}))}))
                                (.then (fn [res] (.json res)))
                                (.then (fn [result]
                                         (let [res-clj (js->clj result :keywordize-keys true)
                                               visible-part (get-visible-segment res-clj)
-                                              last-visible-idx (max 0 (dec (count visible-part)))
-                                              edge-point (nth path last-visible-idx)]
+                                              last-idx (max 0 (dec (count visible-part)))
+                                              edge-point (nth path last-idx)]
                                           
-                                          (swap! boundary-points conj edge-point)
+                                          (swap! boundary-points assoc angle edge-point)
                                           
-                                          ;; Коли всі промені зібрані
                                           (when (= (count @boundary-points) (count angles))
-                                            (let [polygon-points (clj->js (concat [[lat lng]] @boundary-points))
-                                                  poly (L/polygon polygon-points 
-                                                                  (clj->js {:color "#3498db" 
-                                                                            :fillColor "#3498db"
-                                                                            :fillOpacity 0.4
-                                                                            :weight 2}))]
+                                            (let [sorted-coords (map #(get @boundary-points %) angles)
+                                                  clean-coords (filter identity sorted-coords)
+                                                  poly (L/polygon (clj->js (concat [[lat lng]] clean-coords)) 
+                                                                  (clj->js {:color "#3498db" :fillColor "#3498db" :fillOpacity 0.4 :weight 2}))]
                                               (.addTo poly @rays-group)
-                                              ;; Ховаємо лоадер
-                                              (set! (.-display (.-style loader)) "none")))))))))))))))))
+                                              (set! (.-display (.-style loader)) "none")
+                                              (update-legend-ui freq h-base h-user))))))))))))))))
 
-;; Додай це в функцію init
+
+
 (defn setup-ui-events []
-  (let [clear-btn (js/document.getElementById "clear-btn")]
-    (.addEventListener clear-btn "click" 
-      (fn [] 
-        (.clearLayers @rays-group)
-        (when @last-marker 
-          (.remove @last-marker)
-          (reset! last-marker nil))))))
+  (let [clear-btn  (js/document.getElementById "clear-btn")
+        export-btn (js/document.getElementById "export-btn")]
 
-;; Нова деталізована іконка радіощогли
-(def antenna-icon 
-  (.icon js/L (clj->js {:iconUrl "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMyYzNlNTAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0xMiAyTDEyIDUuNU0xMiAyMkwxMiAxMk0xMiAxMkw3IDIyTTEyIDEyTDE3IDIyTTEwIDhoNE04IDExaDhNMTEuNSAyaDEiLz48L3N2Zz4="
-                        :iconSize [40 40]
-                        :iconAnchor [20 40]
-                        :className "antenna-icon-svg"})))
+    ;; Кнопка очищення
+    (when clear-btn
+      (.addEventListener clear-btn "click" 
+        (fn [] 
+          (.clearLayers @rays-group)
+          (when @last-marker 
+            (.remove @last-marker)
+            (reset! last-marker nil))
+          (reset! boundary-points {}) ; Чистимо дані в атомі
+          (let [legend-div (js/document.getElementById "dynamic-legend")]
+            (when legend-div
+              (set! (.-innerHTML legend-div) "Клікніть на карту для розрахунку"))))))
+
+    ;; Кнопка експорту
+    ;; Логіка кнопки "Експорт JSON"
+    (when export-btn
+      (.addEventListener export-btn "click" 
+        (fn []
+          (let [marker @last-marker
+                points @boundary-points]
+            (if (and marker (not-empty points))
+              (let [;; Використовуємо .getLatLng замість прямого доступу до властивості
+                    latlng (.getLatLng marker)
+                    lat (.-lat latlng)
+                    lng (.-lng latlng)
+                    
+                    export-data {:antenna {:lat lat :lng lng}
+                                 :parameters {:h1 (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
+                                              :h2 (js/parseFloat (.-value (js/document.getElementById "user-height")))
+                                              :freq (js/parseInt (.-value (js/document.getElementById "freq-select")))}
+                                 :boundary (into {} (map (fn [[k v]] [(str k) v]) points))}
+                    
+                    json-str (js/JSON.stringify (clj->js export-data))
+                    blob (js/Blob. #js [json-str] #js {:type "application/json"})
+                    url (.createObjectURL js/URL blob)
+                    link (js/document.createElement "a")]
+                
+                (set! (.-href link) url)
+                (set! (.-download link) (str "coverage-" (.getTime (js/Date.)) ".json"))
+                (.click link)
+                (.revokeObjectURL js/URL url))
+              
+              (js/alert "Помилка: Маркер не знайдено або дані ще завантажуються!"))))))))
+
+
+
 
 (defn init []
   (let [topo (L/tileLayer "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png" 
@@ -170,21 +215,16 @@
       (-> (.control.layers js/L base-maps) (.addTo my-map)))
 
     ;; Легенда (тепер вона не заважає напису Leaflet завдяки CSS вище)
-    (let [legend (.control js/L (clj->js {:position "bottomright"}))]
-      (set! (.-onAdd legend) 
-            (fn [map]
-              (let [div (.create js/L.DomUtil "div" "map-legend")]
-                (set! (.-innerHTML div) 
-                      "<div style='text-align:center;'>
-                        <strong style='color:#2c3e50;'>Радіопокриття</strong><br>
-                        <div style='display:flex; align-items:center; justify-content:center; gap:8px; margin:5px 0;'>
-                           <div class='legend-color' style='background: #3498db; width:15px; height:15px; border-radius:3px;'></div> 
-                           <span style='font-weight:bold;'>VHF 170MHz</span>
-                        </div>
-                        <small style='color:#7f8c8d;'>H1: Щогла | H2: 1.7м</small>
-                       </div>")
-                div)))
-      (.addTo legend my-map))
+    ;; Легенда (у функції init)
+(let [legend (.control js/L (clj->js {:position "bottomright"}))]
+  (set! (.-onAdd legend) 
+        (fn [map]
+          (let [div (.create js/L.DomUtil "div" "map-legend")]
+            (set! (.-id div) "dynamic-legend") ; Додаємо ID для легкого пошуку
+            (set! (.-innerHTML div) "Клікніть на карту для розрахунку")
+            div)))
+  (.addTo legend my-map)
+  (reset! legend-ui legend)) ; Зберігаємо в атом
 
     (reset! rays-group (-> (.layerGroup js/L) (.addTo my-map)))
 
@@ -196,3 +236,4 @@
 
     (setup-ui-events)
     (js/console.log "Система готова.")))
+
