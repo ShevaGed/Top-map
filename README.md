@@ -1,4 +1,4 @@
-RadioWave Mapper v6.6.0 📡
+RadioWave Mapper v0.6.0 📡
 
 RadioWave Mapper is a specialized GIS tool designed to visualize VHF/UHF radio propagation zones. Unlike simple "line-of-sight" calculators, this tool accounts for real-world terrain elevations and the Earth's curvature.
 🚀 Key Features

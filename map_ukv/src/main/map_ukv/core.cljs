@@ -2,7 +2,7 @@
   (:require ["leaflet" :as L]))
 
 (defonce map-state (atom nil))
-(defonce last-marker (atom nil))
+(defonce markers (atom [])) ; Тепер тут буде список маркерів
 (defonce rays-group (atom nil)) ; Група для всіх ліній «зірки»
 (defonce antenna-pos (atom nil))
 (defonce legend-ui (atom nil))
@@ -96,104 +96,178 @@
         loader (js/document.getElementById "loader")
         num-points 50]
     
+    ;; 1. КЕРУВАННЯ КІЛЬКІСТЮ МАРКЕРІВ
+    ;; Якщо вже є 2 антени — очищаємо все для нового розрахунку
+    (when (>= (count @markers) 2)
+      (.clearLayers @rays-group)
+      (doseq [m @markers] (.remove m))
+      (reset! markers [])
+      (reset! boundary-points {}))
+
     (set! (.-display (.-style loader)) "block")
-    (.clearLayers @rays-group)
-    (reset! boundary-points {})
 
-    (when @last-marker (.remove @last-marker))
+    ;; 2. СТВОРЕННЯ НОВОГО МАРКЕРА
+    (let [new-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon})) 
+                        (.addTo my-map))
+          _ (swap! markers conj new-marker) ;; Додаємо в список
+          marker-id (count @markers)        ;; Номер антени (1 або 2)
+          ;; Вибираємо колір: перша — синя, друга — помаранчева
+          color (if (= marker-id 1) "#3498db" "#e67e22")]
 
-    (reset! last-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon})) 
-                           (.addTo my-map)))
+      (let [angles (range 0 361 5)
+            angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist a) num-points)]) angles))
+            flat-locations (map (fn [[la ln]] {:latitude la :longitude ln}) 
+                                  (apply concat (map #(get angle-map %) angles)))]
+          
+          (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
+                        (clj->js {:method "POST" 
+                                  :headers {"Content-Type" "application/json"} 
+                                  :body (js/JSON.stringify (clj->js {:locations flat-locations}))}))
+              (.then (fn [res] (.json res)))
+              (.then (fn [data]
+                       (let [all-elevations (map #(.-elevation %) (.-results data))
+                             chunked-elevs (partition (inc num-points) all-elevations)]
+                         
+                         (doseq [[idx elevs] (map-indexed vector chunked-elevs)]
+                           (let [angle (nth angles idx)
+                                 path  (get angle-map angle)]
+                             
+                             (-> (js/fetch "http://localhost:3000/check-profile"
+                                           (clj->js {:method "POST"
+                                                     :headers {"Content-Type" "application/json"}
+                                                     :body (js/JSON.stringify (clj->js {:elevations elevs :h1 h-base :h2 h-user :freq freq}))}))
+                                 (.then (fn [res] (.json res)))
+                                 (.then (fn [result]
+                                          (let [res-clj (js->clj result :keywordize-keys true)
+                                                visible-part (get-visible-segment res-clj)
+                                                last-idx (max 0 (dec (count visible-part)))
+                                                edge-point (nth path last-idx)]
+                                            
+                                            ;; Зберігаємо точки з префіксом антени (наприклад, "1-90" для 1-ї антени, кут 90)
+                                            (swap! boundary-points assoc (str marker-id "-" angle) edge-point)
+                                            
+                                            ;; ПЕРЕВІРКА ЗАВЕРШЕННЯ ДЛЯ ПОТОЧНОЇ АНТЕНИ
+                                            (let [current-antenna-points (filter #(clojure.string/starts-with? % (str marker-id "-")) (keys @boundary-points))]
+                                              (when (= (count current-antenna-points) (count angles))
+                                                (let [sorted-coords (map #(get @boundary-points (str marker-id "-" %)) angles)
+                                                      clean-coords (filter identity sorted-coords)
+                                                      poly (L/polygon (clj->js (concat [[lat lng]] clean-coords)) 
+                                                                      (clj->js {:color color 
+                                                                                :fillColor color 
+                                                                                :fillOpacity 0.4 
+                                                                                :weight 2}))]
+                                                  (.addTo poly @rays-group)
+                                                  (set! (.-display (.-style loader)) "none")
+                                                  (update-legend-ui freq h-base h-user))))))))))))))))))
 
-    (let [angles (range 0 361 5)
-          angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist a) num-points)]) angles))
-          flat-locations (map (fn [[la ln]] {:latitude la :longitude ln}) 
-                                (apply concat (map #(get angle-map %) angles)))]
-        
-        (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
-                      (clj->js {:method "POST" 
-                                :headers {"Content-Type" "application/json"} 
-                                :body (js/JSON.stringify (clj->js {:locations flat-locations}))}))
-            (.then (fn [res] (.json res)))
-            (.then (fn [data]
-                     (let [all-elevations (map #(.-elevation %) (.-results data))
-                           chunked-elevs (partition (inc num-points) all-elevations)]
-                       
-                       (doseq [[idx elevs] (map-indexed vector chunked-elevs)]
-                         (let [angle (nth angles idx)
-                               path  (get angle-map angle)]
-                           
-                           (-> (js/fetch "http://localhost:3000/check-profile"
-                                         (clj->js {:method "POST"
-                                                   :headers {"Content-Type" "application/json"}
-                                                   :body (js/JSON.stringify (clj->js {:elevations elevs :h1 h-base :h2 h-user :freq freq}))}))
-                               (.then (fn [res] (.json res)))
-                               (.then (fn [result]
-                                        (let [res-clj (js->clj result :keywordize-keys true)
-                                              visible-part (get-visible-segment res-clj)
-                                              last-idx (max 0 (dec (count visible-part)))
-                                              edge-point (nth path last-idx)]
-                                          
-                                          (swap! boundary-points assoc angle edge-point)
-                                          
-                                          (when (= (count @boundary-points) (count angles))
-                                            (let [sorted-coords (map #(get @boundary-points %) angles)
-                                                  clean-coords (filter identity sorted-coords)
-                                                  poly (L/polygon (clj->js (concat [[lat lng]] clean-coords)) 
-                                                                  (clj->js {:color "#3498db" :fillColor "#3498db" :fillOpacity 0.4 :weight 2}))]
-                                              (.addTo poly @rays-group)
-                                              (set! (.-display (.-style loader)) "none")
-                                              (update-legend-ui freq h-base h-user))))))))))))))))
+(defn render-history-table [data]
+  (let [body (js/document.getElementById "history-body")]
+    (when body
+      (set! (.-innerHTML body) "")
+      (if (empty? data)
+        (set! (.-innerHTML body) "<tr><td colspan='3' style='text-align:center; padding:10px; color:gray;'>Історія порожня</td></tr>")
+        (doseq [item data]
+          (let [row (.insertRow body)
+                ;; Беремо дату і час (формат SQL: YYYY-MM-DD HH:MM:SS)
+                raw-dt (str (get item "created_at"))
+                dt (if (> (count raw-dt) 16) (subs raw-dt 5 16) raw-dt)
+                freq (get item "freq")
+                h1 (get item "h_antenna")
+                h2 (get item "h_user")]
+            (set! (.-style row) "border-bottom: 1px solid #eee;")
+            (set! (.-innerHTML row)
+                  (str "<td style='padding: 6px 4px; color: #000;'>" dt "</td>"
+                       "<td style='padding: 6px 4px; font-weight: bold; color: #2980b9; text-align: center;'>" freq "</td>"
+                       "<td style='padding: 6px 4px; color: #27ae60; text-align: right;'>" h1 "/" h2 "м</td>"))))))))
 
+
+
+(defn fetch-history []
+  (-> (js/fetch "http://localhost:3000/history")
+      (.then (fn [res] (.json res)))
+      (.then (fn [data]
+               (let [clj-data (js->clj data)]
+                 (render-history-table clj-data))))
+      (.catch (fn [err]
+                (js/console.error "Помилка завантаження історії:" err)))))
+
+
+(defn save-to-db [lat lng h1 h2 freq]
+  (let [data {:lat lat 
+              :lng lng 
+              :h1 h1 
+              :h2 h2 
+              :freq freq}]
+    (-> (js/fetch "http://localhost:3000/save-scan"
+                  (clj->js {:method "POST"
+                            :headers {"Content-Type" "application/json"}
+                            :body (js/JSON.stringify (clj->js data))}))
+        (.then (fn [res] (.json res)))
+        (.then (fn [result]
+                 (js/console.log "Збережено в БД:" result)
+                 (fetch-history)
+                 (js/alert "Розрахунок успішно збережено в базу даних!")))
+        (.catch (fn [err]
+                  (js/console.error "Помилка збереження:" err)
+                  (js/alert "Не вдалося зберегти в БД."))))))
 
 
 (defn setup-ui-events []
   (let [clear-btn  (js/document.getElementById "clear-btn")
-        export-btn (js/document.getElementById "export-btn")]
+        export-btn (js/document.getElementById "export-btn")
+        save-db-btn (js/document.getElementById "save-db-btn")]
 
     ;; Кнопка очищення
     (when clear-btn
       (.addEventListener clear-btn "click" 
-        (fn [] 
-          (.clearLayers @rays-group)
-          (when @last-marker 
-            (.remove @last-marker)
-            (reset! last-marker nil))
-          (reset! boundary-points {}) ; Чистимо дані в атомі
-          (let [legend-div (js/document.getElementById "dynamic-legend")]
-            (when legend-div
-              (set! (.-innerHTML legend-div) "Клікніть на карту для розрахунку"))))))
+                         ;; Усередині setup-ui-events, блок clear-btn:
+                         (fn [] 
+                           (.clearLayers @rays-group)
+                           (doseq [m @markers] (.remove m)) ;; Видаляємо всі маркери зі списку
+                           (reset! markers []) ;; Очищаємо список
+                           (reset! boundary-points {})
+                           (let [legend-div (js/document.getElementById "dynamic-legend")]
+                             (when legend-div
+                               (set! (.-innerHTML legend-div) "Клікніть на карту для розрахунку"))))))
 
     ;; Кнопка експорту
     ;; Логіка кнопки "Експорт JSON"
+    ;; Логіка кнопки "Експорт JSON"
     (when export-btn
       (.addEventListener export-btn "click" 
-        (fn []
-          (let [marker @last-marker
-                points @boundary-points]
-            (if (and marker (not-empty points))
-              (let [;; Використовуємо .getLatLng замість прямого доступу до властивості
-                    latlng (.getLatLng marker)
-                    lat (.-lat latlng)
-                    lng (.-lng latlng)
-                    
-                    export-data {:antenna {:lat lat :lng lng}
-                                 :parameters {:h1 (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
-                                              :h2 (js/parseFloat (.-value (js/document.getElementById "user-height")))
-                                              :freq (js/parseInt (.-value (js/document.getElementById "freq-select")))}
-                                 :boundary (into {} (map (fn [[k v]] [(str k) v]) points))}
-                    
-                    json-str (js/JSON.stringify (clj->js export-data))
-                    blob (js/Blob. #js [json-str] #js {:type "application/json"})
-                    url (.createObjectURL js/URL blob)
-                    link (js/document.createElement "a")]
-                
-                (set! (.-href link) url)
-                (set! (.-download link) (str "coverage-" (.getTime (js/Date.)) ".json"))
-                (.click link)
-                (.revokeObjectURL js/URL url))
-              
-              (js/alert "Помилка: Маркер не знайдено або дані ще завантажуються!"))))))))
+                         (fn []
+                           (let [marker (last @markers) ;; Беремо останню додану антену
+                                 points @boundary-points]
+                             (if (and marker (not-empty points))
+                               (let [latlng (.getLatLng marker)
+                                     lat (.-lat latlng)
+                                     lng (.-lng latlng)
+                                     export-data {:antenna {:lat lat :lng lng}
+                                                  :parameters {:h1 (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
+                                                               :h2 (js/parseFloat (.-value (js/document.getElementById "user-height")))
+                                                               :freq (js/parseInt (.-value (js/document.getElementById "freq-select")))}
+                                                  :boundary (into {} (map (fn [[k v]] [(str k) v]) points))}
+                                     json-str (js/JSON.stringify (clj->js export-data))
+                                     blob (js/Blob. #js [json-str] #js {:type "application/json"})
+                                     url (.createObjectURL js/URL blob)
+                                     link (js/document.createElement "a")]
+                                 (set! (.-href link) url)
+                                 (set! (.-download link) (str "coverage-export.json"))
+                                 (.click link)
+                                 (.revokeObjectURL js/URL url))
+                               (js/alert "Помилка: Антени не знайдено!"))))))
+    (when save-db-btn
+      (.addEventListener save-db-btn "click" 
+                         (fn []
+                           (let [marker (last @markers)]
+                             (if marker
+                               (let [latlng (.getLatLng marker)
+                                     h1 (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
+                                     h2 (js/parseFloat (.-value (js/document.getElementById "user-height")))
+                                     freq (js/parseInt (.-value (js/document.getElementById "freq-select")))]
+                                 ;; Викликаємо функцію збереження, яку ми написали минулим кроком
+                                 (save-to-db (.-lat latlng) (.-lng latlng) h1 h2 freq))
+                               (js/alert "Спочатку поставте антену на карту!"))))))))
 
 
 
@@ -235,5 +309,6 @@
              (handle-map-click lat lng my-map))))
 
     (setup-ui-events)
+    (fetch-history)
     (js/console.log "Система готова.")))
 

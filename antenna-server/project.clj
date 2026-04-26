@@ -7,7 +7,9 @@
                  [ring/ring-core "1.10.0"]
                  [ring/ring-jetty-adapter "1.10.0"]
                  [metosin/reitit "0.5.18"]
-                 [cheshire "5.10.0"]]
+                 [cheshire "5.10.0"]
+                 [com.github.seancorfield/next.jdbc "1.3.883"]
+                 [org.xerial/sqlite-jdbc "3.42.0.0"]]
   :main ^:skip-aot antenna-server.core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all

@@ -1,7 +1,48 @@
 (ns antenna-server.core
   (:require [ring.adapter.jetty :as jetty]
             [ring.util.codec :as codec]
-            [cheshire.core :as json]))
+            [cheshire.core :as json]
+            [next.jdbc :as jdbc]
+            [next.jdbc.result-set :as rs]))
+
+;; Опис підключення до файлу бази даних та ініціалізація таблиці
+(def db-spec {:dbtype "sqlite" :dbname "map_ukv_data.db"})
+
+(defn init-db []
+  (let [ds (jdbc/get-datasource db-spec)]
+    (jdbc/execute! ds ["
+      CREATE TABLE IF NOT EXISTS antenna_scans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lat REAL NOT NULL,
+        lng REAL NOT NULL,
+        h_antenna REAL,
+        h_user REAL,
+        freq INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )"])))
+
+;; Викликаємо створення таблиці при завантаженні файлу
+(init-db)
+
+(defn save-scan [scan-data]
+  (let [ds (jdbc/get-datasource db-spec)]
+    (jdbc/execute! ds 
+      ["INSERT INTO antenna_scans (lat, lng, h_antenna, h_user, freq) 
+        VALUES (?, ?, ?, ?, ?)"
+       (get scan-data "lat")
+       (get scan-data "lng")
+       (get scan-data "h1")
+       (get scan-data "h2")
+       (get scan-data "freq")])))
+
+(defn get-all-scans []
+  (let [ds (jdbc/get-datasource db-spec)]
+    (jdbc/execute! ds ["SELECT 
+                        id, lat, lng, h_antenna, h_user, freq,
+                        datetime(created_at, 'localtime') as created_at 
+                        FROM antenna_scans 
+                        ORDER BY created_at DESC"]
+                   {:builder-fn rs/as-unqualified-maps})))
 
 ;; 1. Функція перевірки видимості (додано параметр freq)
 (defn check-visibility [elevations h1 h2 freq]
@@ -81,6 +122,33 @@
            :headers common-headers
            :body (json/generate-string {:error (.getMessage e)})}))
 
+      ;; 4. Маршрут для збереження даних у БД
+      (and (= uri "/save-scan") (= method :post))
+      (try
+        (let [raw-body (slurp (:body request))
+              body (json/parse-string raw-body)] ;; тут ключі будуть рядками ("lat", "lng" і т.д.)
+          (save-scan body)
+          {:status 200
+           :headers common-headers
+           :body (json/generate-string {:status "success" :message "Збережено успішно"})})
+        (catch Exception e
+          (println "ПОМИЛКА БД:" (.getMessage e))
+          {:status 500
+           :headers common-headers
+           :body (json/generate-string {:error (.getMessage e)})}))
+
+      ;; 5. Маршрут для отримання списку всіх розрахунків
+      (and (= uri "/history") (= method :get))
+      (try
+        (let [history (get-all-scans)]
+          {:status 200
+           :headers (assoc common-headers "Content-Type" "application/json")
+           :body (json/generate-string history)})
+        (catch Exception e
+          (println "ПОМИЛКА ОТРИМАННЯ ІСТОРІЇ:" (.getMessage e))
+          {:status 500
+           :headers common-headers
+           :body (json/generate-string {:error (.getMessage e)})}))
       :else
       {:status 404 :headers common-headers :body "Not Found"})))
 
