@@ -44,6 +44,10 @@
                         ORDER BY created_at DESC"]
                    {:builder-fn rs/as-unqualified-maps})))
 
+(defn delete-scan [id]
+  (let [ds (jdbc/get-datasource db-spec)]
+    (jdbc/execute! ds ["DELETE FROM antenna_scans WHERE id = ?" id])))
+
 ;; 1. Функція перевірки видимості (додано параметр freq)
 (defn check-visibility [elevations h1 h2 freq]
   (if (and (seq elevations) h1 h2)
@@ -83,8 +87,9 @@
 (defn handler [request]
   (let [uri (:uri request)
         method (:request-method request)
+        ;; Додали DELETE у дозволені методи (CORS)
         common-headers {"Access-Control-Allow-Origin" "*"
-                        "Access-Control-Allow-Methods" "POST, GET, OPTIONS"
+                        "Access-Control-Allow-Methods" "POST, GET, DELETE, OPTIONS"
                         "Access-Control-Allow-Headers" "Content-Type"}]
     
     (cond
@@ -101,7 +106,6 @@
          :headers (assoc common-headers "Content-Type" "text/plain; charset=utf-8")
          :body (str "Радіус прямої видимості: " (format "%.2f" distance) " км.")})
 
-      ;; 3. Оновлений розрахунок профілю (тут головні зміни!)
       (and (= uri "/check-profile") (= method :post))
       (try
         (let [raw-body (slurp (:body request))
@@ -109,35 +113,27 @@
               elevations (:elevations body)
               h1 (:h1 body)
               h2 (:h2 body)
-              ;; Витягуємо частоту з JSON, якщо її немає — ставимо 140
               freq (or (:freq body) 140)
-              ;; ПЕРЕДАЄМО freq у функцію розрахунку
               result (check-visibility elevations h1 h2 freq)]
           {:status 200
            :headers (assoc common-headers "Content-Type" "application/json")
            :body (json/generate-string result)})
         (catch Exception e
           (println "ПОМИЛКА НА СЕРВЕРІ:" (.getMessage e))
-          {:status 500
-           :headers common-headers
-           :body (json/generate-string {:error (.getMessage e)})}))
+          {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
 
-      ;; 4. Маршрут для збереження даних у БД
       (and (= uri "/save-scan") (= method :post))
       (try
         (let [raw-body (slurp (:body request))
-              body (json/parse-string raw-body)] ;; тут ключі будуть рядками ("lat", "lng" і т.д.)
+              body (json/parse-string raw-body)]
           (save-scan body)
           {:status 200
            :headers common-headers
            :body (json/generate-string {:status "success" :message "Збережено успішно"})})
         (catch Exception e
           (println "ПОМИЛКА БД:" (.getMessage e))
-          {:status 500
-           :headers common-headers
-           :body (json/generate-string {:error (.getMessage e)})}))
+          {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
 
-      ;; 5. Маршрут для отримання списку всіх розрахунків
       (and (= uri "/history") (= method :get))
       (try
         (let [history (get-all-scans)]
@@ -146,9 +142,20 @@
            :body (json/generate-string history)})
         (catch Exception e
           (println "ПОМИЛКА ОТРИМАННЯ ІСТОРІЇ:" (.getMessage e))
-          {:status 500
+          {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
+
+      ;; НОВИЙ МАРШРУТ ВИДАЛЕННЯ
+      (and (clojure.string/starts-with? uri "/delete-scan/") (= method :delete))
+      (try
+        (let [id (last (clojure.string/split uri #"/"))]
+          (delete-scan id)
+          {:status 200
            :headers common-headers
-           :body (json/generate-string {:error (.getMessage e)})}))
+           :body (json/generate-string {:status "success" :id id})})
+        (catch Exception e
+          (println "ПОМИЛКА ВИДАЛЕННЯ:" (.getMessage e))
+          {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
+
       :else
       {:status 404 :headers common-headers :body "Not Found"})))
 

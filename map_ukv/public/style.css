@@ -1,163 +1,205 @@
-/* Робимо так, щоб сторінка не мала зайвих відступів і займала весь екран */
+/* 1. Базові налаштування */
 body, html {
     margin: 0;
     padding: 0;
     height: 100%;
     width: 100%;
-    overflow: hidden; /* Щоб не було смуг прокрутки */
+    overflow: hidden;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
-/* Налаштування самого контейнера карти */
+/* 2. Карта (займає весь екран мінус висота панелі) */
 #map-id {
-    height: 100vh; /* 100% висоти видимого вікна браузера */
+    height: calc(100vh - 70px); 
     width: 100%;
-    background-color: #e5e3df; /* Колір-заглушка, поки карта вантажиться */
+    background-color: #e5e3df;
 }
 
-/* Панель керування */
+/* 3. Головна панель керування */
 .control-panel {
     display: flex;
-    gap: 20px;
+    justify-content: space-between; /* Розсовує ліво і право */
     align-items: center;
-    padding: 15px;
+    padding: 0 20px;
+    height: 70px;
     background-color: #2c3e50;
     color: #ecf0f1;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    position: relative;
     z-index: 1000;
 }
 
-/* Групи вводу */
+/* Контейнери для групування */
+.controls-left, .controls-right {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+}
+
+/* Групи вводу (label + input) */
 .input-group {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
 }
 
 .input-group label {
-    font-size: 0.8rem;
+    font-size: 0.7rem;
     color: #bdc3c7;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 
-.input-group input[type="number"] {
-    padding: 8px;
+.input-group input[type="number"], 
+.input-group select {
+    padding: 6px 10px;
     border-radius: 4px;
     border: 1px solid #34495e;
     background-color: #ecf0f1;
-    width: 70px;
+    color: #2c3e50;
+    font-weight: 500;
 }
 
-/* Слайдер */
-.slider-group {
-    min-width: 150px;
-}
-
-input[type="range"] {
-    cursor: pointer;
-}
-
-/* Кнопка */
-.btn-danger {
-    background-color: #e74c3c;
-    color: white;
-    border: none;
-    padding: 10px 20px;
+/* 4. Загальний стиль кнопок */
+.btn {
+    padding: 0 18px;
     border-radius: 4px;
+    border: none;
     cursor: pointer;
     font-weight: bold;
-    transition: background 0.3s ease;
-    margin-left: auto; /* Притискає кнопку до правого краю */
-}
-
-.btn-danger:hover {
-    background-color: #c0392b;
-}
-
-/* Лоадер та Спіннер */
-.loader-container {
-    display: none;
+    font-size: 0.85rem;
+    transition: all 0.2s ease;
+    display: inline-flex;
     align-items: center;
-    gap: 10px;
+    justify-content: center;
+    height: 38px;
+    min-width: 130px;
+    gap: 8px;
+}
+
+.btn:active {
+    transform: translateY(1px);
+}
+
+/* Кольори кнопок */
+.btn-success { background-color: #27ae60; color: white; }
+.btn-success:hover { background-color: #219150; }
+
+.btn-primary { background-color: #2980b9; color: white; }
+.btn-primary:hover { background-color: #2471a3; }
+
+.btn-danger { background-color: #e74c3c; color: white; }
+.btn-danger:hover { background-color: #c0392b; }
+
+/* 5. Лоадер (Оверлей поверх карти) */
+.loader-overlay {
+    display: none; /* Вмикається через JS */
+    position: absolute;
+    top: 85px;
+    right: 20px;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 10px 20px;
+    border-radius: 50px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    z-index: 1100;
+    align-items: center;
+    gap: 12px;
+    border: 2px solid #3498db;
     font-weight: bold;
-    color: #3498db;
+    color: #2c3e50;
 }
 
 .spinner {
-    width: 20px;
-    height: 20px;
-    border: 3px solid rgba(52, 152, 219, 0.3);
+    width: 18px;
+    height: 18px;
+    border: 3px solid rgba(52, 152, 219, 0.2);
     border-radius: 50%;
     border-top-color: #3498db;
-    animation: spin 1s ease-in-out infinite;
+    animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
 
-/* Карта на весь екран за мінусом панелі */
-#map-id {
-    height: calc(100vh - 80px);
+/* 6. Віджет історії (ліворуч внизу) */
+.history-widget {
+    position: absolute;
+    bottom: 20px;
+    left: 10px;
+    z-index: 1000;
+    width: 320px;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 12px;
+    border-radius: 8px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    border: 1px solid #ddd;
+}
+
+.history-widget h3 {
+    margin: 0 0 10px 0;
+    font-size: 14px;
+    color: #2c3e50;
+    border-bottom: 2px solid #3498db;
+    padding-bottom: 5px;
+}
+
+.history-scroll-area {
+    max-height: 130px;
+    overflow-y: auto;
+}
+
+/* Стилізація таблиці історії */
+#history-table {
     width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    color: #333;
 }
 
-/* Зміщуємо напис Leaflet (права), щоб він був повністю видимим */
-.leaflet-bottom.leaflet-right .leaflet-control-attribution {
-    margin-right: 10px !important;
-    margin-bottom: 5px !important; /* Трохи піднімаємо від самого краю */
-    padding-right: 150px !important; /* Створюємо "порожнечу" всередині блоку прав під легенду */
-    background: rgba(255, 255, 255, 0.8) !important;
-    border-radius: 5px;
+#history-table thead {
+    position: sticky;
+    top: 0;
+    background: #f8f9fa;
+    z-index: 1;
 }
 
-/* Легенда — тепер вона чітко стоятиме ПОВЕРХ порожнього місця атрибуції */
+#history-table th {
+    padding: 6px 4px;
+    text-align: left;
+    border-bottom: 1px solid #dee2e6;
+    color: #7f8c8d;
+    text-transform: uppercase;
+    font-size: 10px;
+}
+
+/* 7. Легенда карти (праворуч внизу) */
 .map-legend {
     background: white;
     padding: 10px;
     border-radius: 8px;
     box-shadow: 0 4px 15px rgba(0,0,0,0.3);
     font-size: 13px;
-    margin-bottom: 15px !important;
-    margin-right: 10px !important;
     border: 2px solid #3498db;
     min-width: 160px;
-    z-index: 1001; /* Щоб була над картою точно */
-}
-
-/* Оновлена іконка антени */
-.antenna-icon-svg {
-    filter: drop-shadow(0 0 2px white) drop-shadow(0 2px 4px rgba(0,0,0,0.5));
-}
-
-/* Робимо іконку антени чіткою */
-.antenna-marker {
-    filter: drop-shadow(0 0 2px white); /* Білий контур, щоб бачити на супутнику */
 }
 
 .legend-color {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     float: left;
-    margin-right: 8px;
-    opacity: 0.7;
-    border: 1px solid #3498db;
+    margin-right: 10px;
+    border-radius: 2px;
 }
 
-* Стиль для випадаючого списку частот */
-.input-group select {
-    padding: 8px;
-    border-radius: 4px;
-    border: 1px solid #34495e;
-    background-color: #ecf0f1;
-    color: #2c3e50;
-    font-weight: 500;
-    cursor: pointer;
-    outline: none;
+/* 8. Атрибуція Leaflet (щоб не заважала легенді) */
+.leaflet-bottom.leaflet-right .leaflet-control-attribution {
+    margin: 0 10px 5px 0 !important;
+    background: rgba(255, 255, 255, 0.7) !important;
+    font-size: 10px;
 }
 
-.input-group select:focus {
-    border-color: #3498db;
-    box-shadow: 0 0 5px rgba(52, 152, 219, 0.5);
+.history-row:hover {
+    background-color: #f1f4f6 !important;
+    transition: background 0.2s ease;
 }

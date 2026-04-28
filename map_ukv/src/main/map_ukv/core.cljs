@@ -165,21 +165,35 @@
     (when body
       (set! (.-innerHTML body) "")
       (if (empty? data)
-        (set! (.-innerHTML body) "<tr><td colspan='3' style='text-align:center; padding:10px; color:gray;'>Історія порожня</td></tr>")
+        (set! (.-innerHTML body) "<tr><td colspan='4' style='text-align:center; padding:10px; color:gray;'>Історія порожня</td></tr>")
         (doseq [item data]
           (let [row (.insertRow body)
-                ;; Беремо дату і час (формат SQL: YYYY-MM-DD HH:MM:SS)
+                id (get item "id")
+                lat (str (get item "lat"))
+                lng (str (get item "lng"))
+                h1  (str (get item "h_antenna"))
+                h2  (str (get item "h_user"))
+                freq (str (get item "freq"))
                 raw-dt (str (get item "created_at"))
-                dt (if (> (count raw-dt) 16) (subs raw-dt 5 16) raw-dt)
-                freq (get item "freq")
-                h1 (get item "h_antenna")
-                h2 (get item "h_user")]
-            (set! (.-style row) "border-bottom: 1px solid #eee;")
+                dt (if (> (count raw-dt) 16) (subs raw-dt 5 16) raw-dt)]
+            
+            (.setAttribute row "data-lat" lat)
+            (.setAttribute row "data-lng" lng)
+            (.setAttribute row "data-h1" h1)
+            (.setAttribute row "data-h2" h2)
+            (.setAttribute row "data-freq" freq)
+            (.setAttribute row "data-id" id) ; Зберігаємо ID для видалення
+            
+            (set! (.-className row) "history-row")
+            (set! (.-style.cursor row) "pointer")
+
             (set! (.-innerHTML row)
                   (str "<td style='padding: 6px 4px; color: #000;'>" dt "</td>"
                        "<td style='padding: 6px 4px; font-weight: bold; color: #2980b9; text-align: center;'>" freq "</td>"
-                       "<td style='padding: 6px 4px; color: #27ae60; text-align: right;'>" h1 "/" h2 "м</td>"))))))))
-
+                       "<td style='padding: 6px 4px; color: #27ae60; text-align: right;'>" h1 "/" h2 "м</td>"
+                       "<td style='padding: 6px 4px; text-align: center;'>"
+                       "<button class='delete-btn' style='background:none; border:none; color:#e74c3c; cursor:pointer; font-weight:bold; font-size:14px;'>&times;</button>"
+                       "</td>"))))))))
 
 
 (defn fetch-history []
@@ -212,31 +226,42 @@
                   (js/alert "Не вдалося зберегти в БД."))))))
 
 
-(defn setup-ui-events []
-  (let [clear-btn  (js/document.getElementById "clear-btn")
-        export-btn (js/document.getElementById "export-btn")
-        save-db-btn (js/document.getElementById "save-db-btn")]
+(defn delete-from-db [id]
+  (when (and id (js/confirm "Ви впевнені, що хочете видалити цей запис?"))
+    (-> (js/fetch (str "http://localhost:3000/delete-scan/" id)
+                  (clj->js {:method "DELETE"}))
+        (.then (fn [res] 
+                 (if (.-ok res)
+                   (.json res)
+                   (throw (js/Error. "Помилка сервера")))))
+        (.then (fn [result]
+                 (js/console.log "Видалено ID:" id)
+                 (fetch-history))) ; Оновлюємо таблицю
+        (.catch (fn [err]
+                  (js/console.error "Помилка видалення:" err)
+                  (js/alert "Не вдалося видалити запис із бази."))))) )
 
-    ;; Кнопка очищення
+(defn setup-ui-events []
+  (let [clear-btn    (js/document.getElementById "clear-btn")
+        export-btn   (js/document.getElementById "export-btn")
+        save-db-btn  (js/document.getElementById "save-db-btn")
+        history-body (js/document.getElementById "history-body")]
+
     (when clear-btn
       (.addEventListener clear-btn "click" 
-                         ;; Усередині setup-ui-events, блок clear-btn:
                          (fn [] 
                            (.clearLayers @rays-group)
-                           (doseq [m @markers] (.remove m)) ;; Видаляємо всі маркери зі списку
-                           (reset! markers []) ;; Очищаємо список
+                           (doseq [m @markers] (.remove m))
+                           (reset! markers [])
                            (reset! boundary-points {})
                            (let [legend-div (js/document.getElementById "dynamic-legend")]
                              (when legend-div
                                (set! (.-innerHTML legend-div) "Клікніть на карту для розрахунку"))))))
 
-    ;; Кнопка експорту
-    ;; Логіка кнопки "Експорт JSON"
-    ;; Логіка кнопки "Експорт JSON"
     (when export-btn
       (.addEventListener export-btn "click" 
                          (fn []
-                           (let [marker (last @markers) ;; Беремо останню додану антену
+                           (let [marker (last @markers)
                                  points @boundary-points]
                              (if (and marker (not-empty points))
                                (let [latlng (.getLatLng marker)
@@ -252,10 +277,11 @@
                                      url (.createObjectURL js/URL blob)
                                      link (js/document.createElement "a")]
                                  (set! (.-href link) url)
-                                 (set! (.-download link) (str "coverage-export.json"))
+                                 (set! (.-download link) "coverage-export.json")
                                  (.click link)
                                  (.revokeObjectURL js/URL url))
                                (js/alert "Помилка: Антени не знайдено!"))))))
+
     (when save-db-btn
       (.addEventListener save-db-btn "click" 
                          (fn []
@@ -265,11 +291,34 @@
                                      h1 (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
                                      h2 (js/parseFloat (.-value (js/document.getElementById "user-height")))
                                      freq (js/parseInt (.-value (js/document.getElementById "freq-select")))]
-                                 ;; Викликаємо функцію збереження, яку ми написали минулим кроком
                                  (save-to-db (.-lat latlng) (.-lng latlng) h1 h2 freq))
-                               (js/alert "Спочатку поставте антену на карту!"))))))))
+                               (js/alert "Спочатку поставте антену на карту!"))))))
 
-
+   (when history-body
+     (.addEventListener history-body "click"
+       (fn [e]
+         (let [target (.-target e)
+               row (.closest target "tr")
+               id (aget row "dataset" "id")]
+           
+           ;; ПЕРЕВІРКА: Якщо натиснули на кнопку видалення (хрестик)
+           (if (.contains (.-classList target) "delete-btn")
+             (do 
+               (.stopPropagation e) ; Щоб не спрацював клік по всьому рядку
+               (delete-from-db id))
+             
+             ;; Інакше — логіка переходу до антени
+             (let [lat (js/parseFloat (aget row "dataset" "lat"))
+                   lng (js/parseFloat (aget row "dataset" "lng"))
+                   h1 (js/parseFloat (aget row "dataset" "h1"))
+                   h2 (js/parseFloat (aget row "dataset" "h2"))
+                   freq (js/parseInt (aget row "dataset" "freq"))]
+               (when (and (not (js/isNaN lat)) (not (js/isNaN lng)))
+                 (.flyTo @map-state (clj->js [lat lng]) 13)
+                 (set! (.-value (js/document.getElementById "antenna-height")) h1)
+                 (set! (.-value (js/document.getElementById "user-height")) h2)
+                 (set! (.-value (js/document.getElementById "freq-select")) freq)
+                 (handle-map-click lat lng @map-state))))))))))
 
 
 (defn init []
@@ -282,23 +331,25 @@
         
         my-map (-> (.map js/L "map-id" (clj->js {:center [50.0 36.2] :zoom 11 :layers [topo]})))]
 
+    ;; КРИТИЧНО: Зберігаємо екземпляр карти в атом, щоб інші функції (як flyTo) могли його дістати
+    (reset! map-state my-map)
+
     ;; Керування шарами
     (let [base-maps (clj->js {"Топографічна" topo 
                              "Вулиці" streets 
                              "Супутник" satellite})]
       (-> (.control.layers js/L base-maps) (.addTo my-map)))
 
-    ;; Легенда (тепер вона не заважає напису Leaflet завдяки CSS вище)
-    ;; Легенда (у функції init)
-(let [legend (.control js/L (clj->js {:position "bottomright"}))]
-  (set! (.-onAdd legend) 
-        (fn [map]
-          (let [div (.create js/L.DomUtil "div" "map-legend")]
-            (set! (.-id div) "dynamic-legend") ; Додаємо ID для легкого пошуку
-            (set! (.-innerHTML div) "Клікніть на карту для розрахунку")
-            div)))
-  (.addTo legend my-map)
-  (reset! legend-ui legend)) ; Зберігаємо в атом
+    ;; Легенда
+    (let [legend (.control js/L (clj->js {:position "bottomright"}))]
+      (set! (.-onAdd legend) 
+            (fn [map]
+              (let [div (.create js/L.DomUtil "div" "map-legend")]
+                (set! (.-id div) "dynamic-legend")
+                (set! (.-innerHTML div) "Клікніть на карту для розрахунку")
+                div)))
+      (.addTo legend my-map)
+      (reset! legend-ui legend))
 
     (reset! rays-group (-> (.layerGroup js/L) (.addTo my-map)))
 
@@ -308,7 +359,12 @@
                  lng (.-lng (.-latlng e))]
              (handle-map-click lat lng my-map))))
 
+    (when-let [dist-input (js/document.getElementById "scan-dist")]
+      (set! (.-value dist-input) "50"))
+
     (setup-ui-events)
     (fetch-history)
     (js/console.log "Система готова.")))
+
+
 

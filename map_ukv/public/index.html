@@ -13,78 +13,70 @@
 </head>
 <body>
 
- <div id="controls" class="control-panel">
-    <div class="input-group">
-        <label>📡 Висота щогли (м)</label>
-        <input type="number" id="antenna-height" value="10">
+<body>
+    <div id="controls" class="control-panel">
+        
+        <div class="controls-left">
+            <div class="input-group">
+                <label>📡 Висота щогли (м)</label>
+                <input type="number" id="antenna-height" value="10">
+            </div>
+
+            <div class="input-group">
+                <label>🚶 Висота рації (м)</label>
+                <input type="number" id="user-height" value="1.7" step="0.1">
+            </div>
+
+	    <div class="input-group slider-group">
+	      <label>📏 Радіус: <span id="dist-val">50</span> км</label>
+	      <input type="range" id="scan-dist" min="5" max="50" value="50" 
+		     oninput="document.getElementById('dist-val').innerText = this.value">
+	    </div>
+
+            <div class="input-group">
+                <label>📡 Діапазон</label>
+                <select id="freq-select">
+                    <option value="140">VHF (140 MHz)</option>
+                    <option value="440">UHF (440 MHz)</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="controls-right">
+            <button id="export-btn" class="btn btn-success">💾 Експорт JSON</button>
+            <button id="save-db-btn" class="btn btn-primary">🗄 Зберегти в БД</button>
+            <button id="clear-btn" class="btn btn-danger">🗑 Очистити карту</button>
+        </div>
     </div>
 
-    <div class="input-group">
-      <label>🚶 Висота рації (м)</label>
-      <input type="number" id="user-height" value="1.7" step="0.1">
-    </div>
-
-    <div class="input-group slider-group">
-      <label>📏 Радіус: <span id="dist-val">35</span> км</label>
-      <input type="range" id="scan-dist" min="5" max="50" value="35" 
-             oninput="document.getElementById('dist-val').innerText = this.value">
-    </div>
-
-    <button id="clear-btn" class="btn-danger">🗑 Очистити карту</button>
-
-    <button id="export-btn" class="btn btn-success">Експорт JSON</button>
-
-    <button id="save-db-btn" style="background-color: #27ae60; color: white;">Зберегти в БД</button>
-
-
-    <div id="history-container" style="
-				       position: absolute; 
-				       bottom: 20px; 
-				       left: 10px; 
-				       z-index: 1000; 
-				       width: 320px; 
-				       background: rgba(255, 255, 255, 0.95); 
-				       padding: 10px; 
-				       border-radius: 8px; 
-				       box-shadow: 0 0 15px rgba(0,0,0,0.2);
-				       font-family: sans-serif;">
-      
-      <h3 style="margin: 0 0 8px 0; font-size: 14px; color: #2c3e50; border-bottom: 1px solid #ddd;">Історія розрахунків</h3>
-      
-      <div style="max-height: 120px; overflow-y: auto;">
-        <table id="history-table" style="width: 100%; border-collapse: collapse; font-size: 11px;">
-          <thead style="position: sticky; top: 0; background: #eee; color: #333;">
-            <tr>
-              <th style="padding: 4px; text-align: left;">Дата</th>
-              <th style="padding: 4px; text-align: left;">МГц</th>
-              <th style="padding: 4px; text-align: left;">Висоти</th>
-            </tr>
-          </thead>
-          <tbody id="history-body" style="color: #000;">
-          </tbody>
-        </table>
-      </div>
-    </div>
-
+    <div id="map-id"></div>
     
-    <div id="loader" class="loader-container">
+    <div id="map-id"></div>  
+
+    <div id="loader" class="loader-overlay">
         <div class="spinner"></div>
         <span>Обробка рельєфу...</span>
     </div>
 
-    <div class="input-group">
-    <label>📡 Діапазон</label>
-    <select id="freq-select">
-        <option value="140">VHF (140 MHz)</option>
-        <option value="440">UHF (440 MHz)</option>
-    </select>
+    <div id="history-container" class="history-widget">
+      <h3>Історія розрахунків</h3>
+      <div class="history-scroll-area">
+        <table id="history-table">
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>МГц</th>
+              <th>Висоти</th>
+            </tr>
+          </thead>
+          <tbody id="history-body">
+            </tbody>
+        </table>
+      </div>
     </div>
- </div>
-
-<div id="map-id"></div>  
-
 
     <script src="/js/main.js"></script>
+
 
 </body>
 </html>
