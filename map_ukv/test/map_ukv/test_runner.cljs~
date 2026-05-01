@@ -1,0 +1,7 @@
+(ns map-ukv.test-runner
+  (:require [cljs.test :as test]
+            [map-ukv.core-test]))
+
+(defn init []
+  (js/console.log "=== ЗАПУСК ТЕСТІВ ===")
+  (test/run-tests 'map-ukv.core-test))

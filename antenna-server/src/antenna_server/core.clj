@@ -3,7 +3,8 @@
             [ring.util.codec :as codec]
             [cheshire.core :as json]
             [next.jdbc :as jdbc]
-            [next.jdbc.result-set :as rs]))
+            [next.jdbc.result-set :as rs]
+            [taoensso.timbre :as log]))
 
 ;; Опис підключення до файлу бази даних та ініціалізація таблиці
 (def db-spec {:dbtype "sqlite" :dbname "map_ukv_data.db"})
@@ -83,11 +84,9 @@
                    e-list))
     []))
 
-;; 2. Головний обробник запитів
 (defn handler [request]
   (let [uri (:uri request)
         method (:request-method request)
-        ;; Додали DELETE у дозволені методи (CORS)
         common-headers {"Access-Control-Allow-Origin" "*"
                         "Access-Control-Allow-Methods" "POST, GET, DELETE, OPTIONS"
                         "Access-Control-Allow-Headers" "Content-Type"}]
@@ -97,29 +96,33 @@
       {:status 200 :headers common-headers :body ""}
 
       (= uri "/calculate")
-      (let [params (if (:query-string request) (codec/form-decode (:query-string request)) {})
-            h (Double/parseDouble (get params "h" "0"))
-            elevation (Double/parseDouble (get params "elevation" "0"))
-            total-h (+ h elevation)
-            distance (* 4.12 (Math/sqrt total-h))]
-        {:status 200
-         :headers (assoc common-headers "Content-Type" "text/plain; charset=utf-8")
-         :body (str "Радіус прямої видимості: " (format "%.2f" distance) " км.")})
+      (try
+        (let [params (if (:query-string request) (codec/form-decode (:query-string request)) {})
+              h (Double/parseDouble (get params "h" "0"))
+              elevation (Double/parseDouble (get params "elevation" "0"))
+              total-h (+ h elevation)
+              distance (* 4.12 (Math/sqrt total-h))]
+          (log/info "Запит /calculate: h =" h ", elevation =" elevation)
+          {:status 200
+           :headers (assoc common-headers "Content-Type" "text/plain; charset=utf-8")
+           :body (str "Радіус прямої видимості: " (format "%.2f" distance) " км.")})
+        (catch Exception e
+          (log/error e "Помилка розрахунку радіусу")
+          {:status 400 :headers common-headers :body "Некоректні параметри"}))
 
       (and (= uri "/check-profile") (= method :post))
       (try
         (let [raw-body (slurp (:body request))
               body (json/parse-string raw-body true)
-              elevations (:elevations body)
-              h1 (:h1 body)
-              h2 (:h2 body)
-              freq (or (:freq body) 140)
-              result (check-visibility elevations h1 h2 freq)]
+              {elevations :elevations h1 :h1 h2 :h2 freq :freq} body
+              freq-val (or freq 140)
+              result (check-visibility elevations h1 h2 freq-val)]
+          (log/info "Запит /check-profile: точок =" (count elevations) "freq =" freq-val)
           {:status 200
            :headers (assoc common-headers "Content-Type" "application/json")
            :body (json/generate-string result)})
         (catch Exception e
-          (println "ПОМИЛКА НА СЕРВЕРІ:" (.getMessage e))
+          (log/error e "ПОМИЛКА НА СЕРВЕРІ (профіль)")
           {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
 
       (and (= uri "/save-scan") (= method :post))
@@ -127,38 +130,49 @@
         (let [raw-body (slurp (:body request))
               body (json/parse-string raw-body)]
           (save-scan body)
+          (log/info "Запит /save-scan: збережено нову точку")
           {:status 200
            :headers common-headers
            :body (json/generate-string {:status "success" :message "Збережено успішно"})})
         (catch Exception e
-          (println "ПОМИЛКА БД:" (.getMessage e))
+          (log/error e "ПОМИЛКА БД (збереження)")
           {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
 
       (and (= uri "/history") (= method :get))
       (try
         (let [history (get-all-scans)]
+          (log/info "Запит /history: віддано" (count history) "записів")
           {:status 200
            :headers (assoc common-headers "Content-Type" "application/json")
            :body (json/generate-string history)})
         (catch Exception e
-          (println "ПОМИЛКА ОТРИМАННЯ ІСТОРІЇ:" (.getMessage e))
+          (log/error e "ПОМИЛКА ОТРИМАННЯ ІСТОРІЇ")
           {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
 
-      ;; НОВИЙ МАРШРУТ ВИДАЛЕННЯ
       (and (clojure.string/starts-with? uri "/delete-scan/") (= method :delete))
       (try
         (let [id (last (clojure.string/split uri #"/"))]
           (delete-scan id)
+          (log/info "Запит /delete-scan: видалено ID =" id)
           {:status 200
            :headers common-headers
            :body (json/generate-string {:status "success" :id id})})
         (catch Exception e
-          (println "ПОМИЛКА ВИДАЛЕННЯ:" (.getMessage e))
+          (log/error e "ПОМИЛКА ВИДАЛЕННЯ")
           {:status 500 :headers common-headers :body (json/generate-string {:error (.getMessage e)})}))
 
       :else
-      {:status 404 :headers common-headers :body "Not Found"})))
+      (do
+        (log/warn "Маршрут не знайдено:" uri)
+        {:status 404 :headers common-headers :body "Not Found"}))))
 
 (defn -main []
-  (jetty/run-jetty handler {:port 3000 :join? false})
-  (println "Сервер запущено на http://localhost:3000"))
+  (log/info "Вхід у головну функцію")
+  (try
+    (jetty/run-jetty handler {:port 3000 :join? false})
+    (log/info "Сервер успішно запущено на http://localhost:3000")
+    (catch Exception e
+      (log/error e "Не вдалося запустити сервер!"))))
+
+
+
