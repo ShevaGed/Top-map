@@ -5,6 +5,7 @@ target/
 .cpcache/
 checkouts/
 bin/
+map_ukv_data.db
 
 # Build outputs
 antenna-server/resources/
