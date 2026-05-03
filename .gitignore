@@ -5,3 +5,8 @@ target/
 .cpcache/
 checkouts/
 bin/
+
+# Build outputs
+antenna-server/resources/
+map_ukv/public/js/
+map_ukv/public/test/
