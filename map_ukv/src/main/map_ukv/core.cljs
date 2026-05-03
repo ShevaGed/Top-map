@@ -1,5 +1,6 @@
 (ns map-ukv.core
-  (:require ["leaflet" :as L]))
+  (:require ["leaflet" :as L]
+            [clojure.string :as str]))
 
 (defonce map-state (atom nil))
 (defonce markers (atom [])) ; Тепер тут буде список маркерів
@@ -168,7 +169,7 @@
                                           
                                           (swap! boundary-points assoc (str marker-id "-" angle) edge-point)
                                           
-                                          (let [current-antenna-points (filter #(clojure.string/starts-with? % (str marker-id "-")) (keys @boundary-points))]
+                                          (let [current-antenna-points (filter #(str/starts-with? % (str marker-id "-")) (keys @boundary-points))]
                                             (when (= (count current-antenna-points) (count angles))
                                               (let [sorted-coords (map #(get @boundary-points (str marker-id "-" %)) angles)
                                                     clean-coords (filter identity sorted-coords)
