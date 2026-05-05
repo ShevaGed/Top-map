@@ -1,5 +1,6 @@
 (ns map-ukv.core
-  (:require ["leaflet" :as L]))
+  (:require ["leaflet" :as L]
+            [clojure.string :as str]))
 
 (defonce map-state (atom nil))
 (defonce markers (atom [])) ; Тепер тут буде список маркерів
@@ -8,7 +9,7 @@
 (defonce legend-ui (atom nil))
 (defonce boundary-points (atom {}))
 
-(def API-URL "http://localhost:3000")
+(def API-URL "")
 
 (def antenna-icon 
   (.icon js/L (clj->js {:iconUrl "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMyYzNlNTAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0xMiAyTDEyIDUuNU0xMiAyMkwxMiAxMk0xMiAxMkw3IDIyTTEyIDEyTDE3IDIyTTEwIDhoNE04IDExaDhNMTEuNSAyaDEiLz48L3N2Zz4="
@@ -50,7 +51,7 @@
 
 (defn fetch-ray-visibility [path-points h]
   (let [body-api (clj->js {:locations (map (fn [[lat lng]] {:latitude lat :longitude lng}) path-points)})]
-    (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
+    (-> (js/fetch (str API-URL "/elevation")
                   (clj->js {:method "POST" :headers {"Content-Type" "application/json"} :body (js/JSON.stringify body-api)}))
         (.then (fn [res] (.json res)))
         (.then (fn [data]
@@ -138,7 +139,7 @@
               flat-locations (map (fn [[la ln]] {:latitude la :longitude ln}) 
                                   (apply concat (map #(get angle-map %) angles)))]
           
-         (-> (js/fetch "https://api.open-elevation.com/api/v1/lookup"
+         (-> (js/fetch (str API-URL "/elevation")
                       (clj->js {:method "POST" 
                                 :headers {"Content-Type" "application/json"} 
                                 :body (js/JSON.stringify (clj->js {:locations flat-locations}))}))
@@ -168,7 +169,7 @@
                                           
                                           (swap! boundary-points assoc (str marker-id "-" angle) edge-point)
                                           
-                                          (let [current-antenna-points (filter #(clojure.string/starts-with? % (str marker-id "-")) (keys @boundary-points))]
+                                          (let [current-antenna-points (filter #(str/starts-with? % (str marker-id "-")) (keys @boundary-points))]
                                             (when (= (count current-antenna-points) (count angles))
                                               (let [sorted-coords (map #(get @boundary-points (str marker-id "-" %)) angles)
                                                     clean-coords (filter identity sorted-coords)

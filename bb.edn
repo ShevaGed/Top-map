@@ -1,0 +1,125 @@
+{:min-bb-version "1.0.0"
+ :tasks
+ {:requires ([babashka.fs :as fs]
+             [babashka.process :as p :refer [shell process]])
+
+  :init (do
+          (def fe-dir       "map_ukv")
+          (def be-dir       "antenna-server")
+          (def fe-public    (str fe-dir "/public"))
+          (def be-resources (str be-dir "/resources"))
+          (def be-public    (str be-resources "/public"))
+          (def fe-assets    ["index.html" "style.css" "js"]))
+
+  ;; ---- Clean ----------------------------------------------------------
+
+  clean:fe
+  {:doc "Remove frontend build artifacts."
+   :task (do
+           (fs/delete-tree (str fe-public "/js"))
+           (fs/delete-tree (str fe-public "/test"))
+           (fs/delete-tree (str fe-dir "/.shadow-cljs")))}
+
+  clean:be
+  {:doc "Remove backend build artifacts (target + bundled frontend)."
+   :task (do
+           (fs/delete-tree (str be-dir "/target"))
+           (fs/delete-tree be-public))}
+
+  clean
+  {:doc "Remove all build artifacts."
+   :depends [clean:fe clean:be]}
+
+  ;; ---- npm ------------------------------------------------------------
+
+  npm-install
+  {:doc "Install frontend npm dependencies (only if node_modules missing)."
+   :task (when-not (fs/exists? (str fe-dir "/node_modules"))
+           (println "[npm-install] Installing JS dependencies...")
+           (shell {:dir fe-dir} "npm install"))}
+
+  ;; ---- Build ----------------------------------------------------------
+
+  build:fe
+  {:doc "Compile frontend release bundle into map_ukv/public/js/."
+   :depends [npm-install]
+   :task (do
+           (println "[build:fe] Cleaning stale js output...")
+           (fs/delete-tree (str fe-public "/js"))
+           (println "[build:fe] Compiling release bundle...")
+           (shell {:dir fe-dir} "npx shadow-cljs release app"))}
+
+  build:be
+  {:doc "Bundle frontend into backend resources and build uberjar."
+   :depends [build:fe]
+   :task (do
+           (println "[build:be] Copying frontend assets to backend resources...")
+           (fs/delete-tree be-public)
+           (fs/create-dirs be-public)
+           (doseq [name fe-assets]
+             (let [src (fs/path fe-public name)
+                   dst (fs/path be-public name)]
+               (when (fs/exists? src)
+                 (if (fs/directory? src)
+                   (fs/copy-tree src dst)
+                   (fs/copy src dst)))))
+           (println "[build:be] Building uberjar...")
+           (shell {:dir be-dir} "lein uberjar"))}
+
+  build
+  {:doc "Build everything: frontend release + backend uberjar."
+   :depends [build:be]
+   :task (let [jars (fs/glob (str be-dir "/target/uberjar") "*-standalone.jar")]
+           (when (seq jars)
+             (println "[build] Done:" (str (first jars)))))}
+
+  ;; ---- Dev ------------------------------------------------------------
+
+  dev:fe
+  {:doc "Run shadow-cljs watch (dev-http on :8080 / :9000)."
+   :depends [npm-install]
+   :task (shell {:dir fe-dir} "npx shadow-cljs watch app")}
+
+  dev:be
+  {:doc "Run backend with lein on :3000 (or $PORT)."
+   :task (shell {:dir be-dir} "lein run")}
+
+  dev
+  {:doc "Run frontend watch + backend in parallel. Ctrl-C stops both."
+   :depends [npm-install]
+   :task (let [opts {:out :inherit :err :inherit
+                     :shutdown p/destroy-tree}
+               fe (process ["npx" "shadow-cljs" "watch" "app"]
+                           (assoc opts :dir fe-dir))
+               be (process ["lein" "run"]
+                           (assoc opts :dir be-dir))]
+           (println "[dev] FE: http://localhost:8080  (shadow-cljs watch)")
+           (println "[dev] BE: http://localhost:3000  (lein run)")
+           (println "[dev] Ctrl-C to stop both.")
+           (run! deref [fe be]))}
+
+  ;; ---- Run ------------------------------------------------------------
+
+  run
+  {:doc "Run the built uberjar (java -jar)."
+   :override-builtin true
+   :task (let [jars (fs/glob (str be-dir "/target/uberjar") "*-standalone.jar")]
+           (if (seq jars)
+             (shell "java" "-jar" (str (first jars)))
+             (do (println "No uberjar found. Run `bb build` first.")
+                 (System/exit 1))))}
+
+  ;; ---- Test -----------------------------------------------------------
+
+  test:fe
+  {:doc "Compile frontend test build."
+   :depends [npm-install]
+   :task (shell {:dir fe-dir} "npx shadow-cljs compile test")}
+
+  test:be
+  {:doc "Run backend lein tests."
+   :task (shell {:dir be-dir} "lein test")}
+
+  test
+  {:doc "Run all tests (backend + frontend)."
+   :depends [test:be test:fe]}}}
