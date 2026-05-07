@@ -16,7 +16,7 @@
   (:gen-class))
 
 ;; Опис підключення до файлу бази даних та ініціалізація таблиці
-(def db-spec {:dbtype "sqlite" :dbname "map_ukv_data.db"})
+(def db-spec {:jdbcUrl "jdbc:sqlite:map_ukv_data.db?journal_mode=WAL&busy_timeout=5000"})
 
 (defn init-db []
   (let [ds (jdbc/get-datasource db-spec)]
@@ -441,10 +441,22 @@
 
 (defn -main [& _args]
   (log/info "Вхід у головну функцію")
+  
+  ;; --- Налаштування бази даних (WAL режим) ---
+  (try
+    (let [ds (jdbc/get-datasource db-spec)]
+      (jdbc/execute! ds ["PRAGMA journal_mode=WAL;"])
+      (jdbc/execute! ds ["PRAGMA synchronous=NORMAL;"])
+      (log/info "✅ SQLite переведено в режим WAL"))
+    (catch Exception e
+      (log/error e "Помилка при налаштуванні SQLite")))
+  ;; -------------------------------------------
+
   (let [test-h (get-local-elevation 50.45 30.52)]
     (if test-h
       (log/info "✅ ТЕСТ SRTM ПРОЙДЕНО: Висота в Києві =" test-h "м.")
       (log/warn "❌ ТЕСТ SRTM ПРОВАЛЕНО: Файл не знайдено за шляхом antenna-server/data/srtm/N50E030.hgt")))
+  
   (let [port (Integer/parseInt (or (System/getenv "PORT") "3000"))]
     (try
       (jetty/run-jetty handler {:port port :join? false})

@@ -113,7 +113,7 @@
         dist   (js/parseFloat (.-value (js/document.getElementById "scan-dist")))
         freq   (js/parseInt (.-value (js/document.getElementById "freq-select")))
         loader (js/document.getElementById "loader")
-        num-points 50]
+        num-points (-> (* dist 5) (js/Math.max 20) (js/Math.min 300) js/Math.round)]
 
     ;; 1. ВАЛІДАЦІЯ
     (when (validate-params h-base h-user dist freq)
@@ -134,7 +134,7 @@
             marker-id (count @markers)
             color (if (= marker-id 1) "#3498db" "#e67e22")]
 
-        (let [angles (range 0 361 5)
+        (let [angles (range 0 361 2)
               angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist a) num-points)]) angles))
               flat-locations (map (fn [[la ln]] {:latitude la :longitude ln}) 
                                   (apply concat (map #(get angle-map %) angles)))]
