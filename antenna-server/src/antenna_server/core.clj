@@ -42,16 +42,42 @@
 ;; Викликаємо створення таблиці при завантаженні файлу
 (init-db)
 
+
+(defn get-local-elevation [lat lng]
+  (let [lat-floor (int (Math/floor lat))
+        lng-floor (int (Math/floor lng))
+        filename (format "data/srtm/N%02dE%03d.hgt" lat-floor lng-floor)
+        file (clojure.java.io/file filename)]
+    (if (.exists file)
+      (try
+        (with-open [is (clojure.java.io/input-stream file)]
+          (let [size 1201 ;; Розмір сітки SRTM3
+                row (int (* (- 1.0 (- lat lat-floor)) (dec size)))
+                col (int (* (- lng lng-floor) (dec size)))
+                offset (* 2 (+ (* row size) col))
+                buffer (byte-array 2)]
+            (.skip is offset)
+            (.read is buffer)
+            (let [b1 (bit-and (aget buffer 0) 0xff)
+                  b2 (bit-and (aget buffer 1) 0xff)
+                  h (bit-or (bit-shift-left b1 8) b2)]
+              (double (if (> h 32767) (- h 65536) h)))))
+        (catch Exception e
+          (log/error "Помилка читання файлу:" (.getMessage e))
+          nil))
+      nil)))
+
+
 (defn save-scan [scan-data]
   (let [ds (jdbc/get-datasource db-spec)]
     (jdbc/execute! ds
-      ["INSERT INTO antenna_scans (lat, lng, h_antenna, h_user, freq)
+                   ["INSERT INTO antenna_scans (lat, lng, h_antenna, h_user, freq)
         VALUES (?, ?, ?, ?, ?)"
-       (get scan-data "lat")
-       (get scan-data "lng")
-       (get scan-data "h1")
-       (get scan-data "h2")
-       (get scan-data "freq")])))
+                    (get scan-data "lat")
+                    (get scan-data "lng")
+                    (get scan-data "h1")
+                    (get scan-data "h2")
+                    (get scan-data "freq")])))
 
 (defn get-all-scans []
   (let [ds (jdbc/get-datasource db-spec)]
@@ -323,33 +349,63 @@
                           [(quantize latitude) (quantize longitude)])
                         locations)
           unique-keys (distinct q-pairs)
+          
+          ;; 1. Перевіряємо SQLite кеш
           cached (cache-lookup ds unique-keys)
-          missing-keys (remove cached unique-keys)
-          fetched (when (seq missing-keys)
+          missing-after-cache (remove cached unique-keys)
+          
+          ;; 2. Шукаємо в локальних SRTM файлах ті точки, яких немає в кеші
+          local-data (reduce (fn [acc [lat lng]]
+                               (if-let [h (get-local-elevation lat lng)]
+                                 (assoc acc [lat lng] h)
+                                 acc))
+                             {}
+                             missing-after-cache)
+          
+          ;; 3. Зберігаємо знайдене в файлах назад у SQLite для швидкості
+          _ (when (seq local-data)
+              (cache-insert! ds (map (fn [[[lat lng] h]]
+                                       {:lat lat :lng lng :elevation h})
+                                     local-data)))
+          
+          ;; 4. Тільки те, чого немає ні в кеші, ні в файлах — іде в інтернет
+          all-known-locally (merge cached local-data)
+          final-missing (remove all-known-locally unique-keys)
+          
+          fetched (when (seq final-missing)
                     (fetch-elevations-chunked
-                      (map (fn [[lat lng]]
-                             {:latitude lat :longitude lng})
-                           missing-keys)))
-          new-rows (map (fn [{:keys [latitude longitude elevation]}]
-                          {:lat latitude :lng longitude :elevation elevation})
-                        fetched)
-          _ (cache-insert! ds new-rows)
-          all-by-key (merge cached
-                            (into {} (map (fn [{:keys [lat lng elevation]}]
-                                            [[lat lng] elevation])
-                                          new-rows)))
+                      (map (fn [[lat lng]] {:latitude lat :longitude lng})
+                           final-missing)))
+          
+          ;; 5. Додаємо результати з інтернету до загальної карти
+          new-from-upstream (into {} (map (fn [{:keys [latitude longitude elevation]}]
+                                            [[(quantize latitude) (quantize longitude)] elevation])
+                                          fetched))
+          
+          ;; Зберігаємо інтернет-дані в кеш
+          _ (when (seq fetched)
+              (cache-insert! ds (map (fn [{:keys [latitude longitude elevation]}]
+                                       {:lat latitude :lng longitude :elevation elevation})
+                                     fetched)))
+
+          all-by-key (merge all-known-locally new-from-upstream)
+          
           results (mapv (fn [[lat-q lng-q] {:keys [latitude longitude]}]
                           {:latitude latitude
                            :longitude longitude
                            :elevation (get all-by-key [lat-q lng-q])})
                         q-pairs locations)]
+      
       (log/info (str "Запит /elevation: точок=" (count locations)
-                     " cache-hit=" (- (count locations) (count missing-keys))
-                     " upstream=" (count missing-keys)
+                     " cache=" (count cached)
+                     " local-files=" (count local-data)
+                     " upstream=" (count final-missing)
                      " backoff=" (current-backoff-ms) "ms"))
+      
       {:status 200
        :headers {"Content-Type" "application/json"}
        :body (json/generate-string {:results results})})
+    
     (catch clojure.lang.ExceptionInfo e
       (log/error "Помилка отримання висот upstream:" (.getMessage e))
       {:status 502
@@ -385,6 +441,10 @@
 
 (defn -main [& _args]
   (log/info "Вхід у головну функцію")
+  (let [test-h (get-local-elevation 50.45 30.52)]
+    (if test-h
+      (log/info "✅ ТЕСТ SRTM ПРОЙДЕНО: Висота в Києві =" test-h "м.")
+      (log/warn "❌ ТЕСТ SRTM ПРОВАЛЕНО: Файл не знайдено за шляхом antenna-server/data/srtm/N50E030.hgt")))
   (let [port (Integer/parseInt (or (System/getenv "PORT") "3000"))]
     (try
       (jetty/run-jetty handler {:port port :join? false})
