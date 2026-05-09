@@ -93,18 +93,15 @@
     (jdbc/execute! ds ["DELETE FROM antenna_scans WHERE id = ?" id])))
 
 ;; 1. Функція перевірки видимості (додано параметр freq)
-(defn check-visibility [elevations h1 h2 freq]
+(defn check-visibility [elevations h1 h2 freq dist-m] ;; додали dist-m
   (if (and (seq elevations) h1 h2)
     (let [n (count elevations)
           e-list (map double elevations)
-          dist-total 45000.0
+          dist-total (double (or dist-m 45000.0)) ;; використовуємо передану дистанцію
           step-dist (/ dist-total (max 1 (dec n)))
 
           k 1.33
           earth-radius (* 6371000.0 k)
-
-          ;; Визначаємо запас на дифракцію залежно від частоти
-          ;; freq приходить з фронтенда як 140 або 440
           diffraction-margin (if (< freq 300) 4.0 1.0)
 
           start-h (+ (first e-list) (double h1))
@@ -120,7 +117,7 @@
 
                            effective-ray-h (- ray-h drop-m)
                            is-visible (> (+ effective-ray-h diffraction-margin) ground-h)]
-                       {:dist idx
+                       {:dist (* idx step-dist) ;; повертаємо реальну дистанцію в метрах
                         :ground ground-h
                         :ray effective-ray-h
                         :visible is-visible}))
@@ -160,9 +157,10 @@
 (defn check-profile-handler [request]
   (try
     (let [body (json/parse-string (slurp (:body request)) true)
-          {elevations :elevations h1 :h1 h2 :h2 freq :freq} body
+          ;; додаємо dist сюди
+          {:keys [elevations h1 h2 freq dist]} body
           freq-val (or freq 140)
-          result (check-visibility elevations h1 h2 freq-val)]
+          result (check-visibility elevations h1 h2 freq-val dist)]
       (log/info "Запит /check-profile: точок =" (count elevations) "freq =" freq-val)
       {:status 200
        :headers {"Content-Type" "application/json"}
@@ -175,13 +173,13 @@
 (defn check-profile-batch-handler [request]
   (try
     (let [body (json/parse-string (slurp (:body request)) true)
-          ;; elevations_list — це список списків висот для кожного променя
-          {elevs-list :elevations_list h1 :h1 h2 :h2 freq :freq} body
+          ;; додаємо dist сюди
+          {:keys [elevations_list h1 h2 freq dist]} body
           freq-val (or freq 140)
-          ;; Обробляємо кожен промінь через нашу існуючу логіку
-          results (mapv #(check-visibility % h1 h2 freq-val) elevs-list)]
+          ;; Передаємо dist у кожен виклик
+          results (mapv #(check-visibility % h1 h2 freq-val dist) elevations_list)]
       
-      (log/info (str "Запит /check-profile-batch: променів=" (count elevs-list)))
+      (log/info (str "Запит /check-profile-batch: променів=" (count elevations_list) " dist=" dist))
       
       {:status 200
        :headers {"Content-Type" "application/json"}
@@ -190,6 +188,8 @@
       (log/error e "ПОМИЛКА НА СЕРВЕРІ (batch профіль)")
       {:status 500
        :body (json/generate-string {:error (.getMessage e)})})))
+
+
 
 (defn save-scan-handler [request]
   (try
@@ -361,81 +361,23 @@
 
 (defn elevation-handler [request]
   (try
-    (let [ds (jdbc/get-datasource db-spec)
-          body (json/parse-string (slurp (:body request)) true)
+    (let [body (json/parse-string (slurp (:body request)) true)
           locations (:locations body)
-          q-pairs (mapv (fn [{:keys [latitude longitude]}]
-                          [(quantize latitude) (quantize longitude)])
-                        locations)
-          unique-keys (distinct q-pairs)
-          
-          ;; 1. Перевіряємо SQLite кеш
-          cached (cache-lookup ds unique-keys)
-          missing-after-cache (remove cached unique-keys)
-          
-          ;; 2. Шукаємо в локальних SRTM файлах ті точки, яких немає в кеші
-          local-data (reduce (fn [acc [lat lng]]
-                               (if-let [h (get-local-elevation lat lng)]
-                                 (assoc acc [lat lng] h)
-                                 acc))
-                             {}
-                             missing-after-cache)
-          
-          ;; 3. Зберігаємо знайдене в файлах назад у SQLite для швидкості
-          _ (when (seq local-data)
-              (cache-insert! ds (map (fn [[[lat lng] h]]
-                                       {:lat lat :lng lng :elevation h})
-                                     local-data)))
-          
-          ;; 4. Тільки те, чого немає ні в кеші, ні в файлах — іде в інтернет
-          all-known-locally (merge cached local-data)
-          final-missing (remove all-known-locally unique-keys)
-          
-          fetched (when (seq final-missing)
-                    (fetch-elevations-chunked
-                      (map (fn [[lat lng]] {:latitude lat :longitude lng})
-                           final-missing)))
-          
-          ;; 5. Додаємо результати з інтернету до загальної карти
-          new-from-upstream (into {} (map (fn [{:keys [latitude longitude elevation]}]
-                                            [[(quantize latitude) (quantize longitude)] elevation])
-                                          fetched))
-          
-          ;; Зберігаємо інтернет-дані в кеш
-          _ (when (seq fetched)
-              (cache-insert! ds (map (fn [{:keys [latitude longitude elevation]}]
-                                       {:lat latitude :lng longitude :elevation elevation})
-                                     fetched)))
-
-          all-by-key (merge all-known-locally new-from-upstream)
-          
-          results (mapv (fn [[lat-q lng-q] {:keys [latitude longitude]}]
+          ;; Пряме отримання висот з файлів без інтернету і без зайвого кешування в БД
+          results (mapv (fn [{:keys [latitude longitude]}]
                           {:latitude latitude
                            :longitude longitude
-                           :elevation (get all-by-key [lat-q lng-q])})
-                        q-pairs locations)]
+                           :elevation (or (get-local-elevation latitude longitude) 0.0)})
+                        locations)]
       
-      (log/info (str "Запит /elevation: точок=" (count locations)
-                     " cache=" (count cached)
-                     " local-files=" (count local-data)
-                     " upstream=" (count final-missing)
-                     " backoff=" (current-backoff-ms) "ms"))
+      (log/info (str "Швидкий запит /elevation: оброблено " (count locations) " точок з локальних файлів"))
       
       {:status 200
        :headers {"Content-Type" "application/json"}
        :body (json/generate-string {:results results})})
-    
-    (catch clojure.lang.ExceptionInfo e
-      (log/error "Помилка отримання висот upstream:" (.getMessage e))
-      {:status 502
-       :headers {"Content-Type" "application/json"}
-       :body (json/generate-string
-               {:error "Upstream elevation API failed"
-                :status (-> e ex-data :status)})})
     (catch Exception e
-      (log/error e "Помилка /elevation")
+      (log/error e "Помилка швидкого /elevation")
       {:status 500
-       :headers {"Content-Type" "application/json"}
        :body (json/generate-string {:error (.getMessage e)})})))
 
 ;; ---- Routes ---------------------------------------------------------

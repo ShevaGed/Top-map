@@ -109,19 +109,17 @@
 
 
 (defn handle-map-click [lat lng my-map]
-  (let [h-base (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
-        h-user (js/parseFloat (.-value (js/document.getElementById "user-height")))
-        dist   (js/parseFloat (.-value (js/document.getElementById "scan-dist")))
-        freq   (js/parseInt (.-value (js/document.getElementById "freq-select")))
-        loader (js/document.getElementById "loader")
-        
-        ;; Налаштування точності: 
-        ;; 120 променів (кожні 3 градуси) та крок ~400м для швидкості
-        angles (range 0 361 3)
-        num-points (-> (/ dist 0.4) (js/Math.max 20) (js/Math.min 150) js/Math.round)]
+  (let [h-base     (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
+        h-user     (js/parseFloat (.-value (js/document.getElementById "user-height")))
+        dist-km    (js/parseFloat (.-value (js/document.getElementById "scan-dist")))
+        dist-m     (* dist-km 1000) ;; переводимо в метри для бекенду
+        freq       (js/parseInt (.-value (js/document.getElementById "freq-select")))
+        loader     (js/document.getElementById "loader")
+        angles     (range 0 361 3)
+        num-points (-> (/ dist-km 0.4) (js/Math.max 20) (js/Math.min 150) js/Math.round)]
 
-    (when (validate-params h-base h-user dist freq)
-      ;; Очищення попередніх результатів
+    (when (validate-params h-base h-user dist-km freq)
+      ;; Очищення попередніх маркерів та ліній
       (when (>= (count @markers) 2)
         (.clearLayers @rays-group)
         (doseq [m @markers] (.remove m))
@@ -136,11 +134,12 @@
             marker-id (count @markers)
             color (if (= marker-id 1) "#3498db" "#e67e22")
             
-            ;; Готуємо координати для всіх променів одним масивом
-            angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist a) num-points)]) angles))
+            ;; 1. Розрахунок геометрії променів
+            angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist-km a) num-points)]) angles))
             flat-locations (map (fn [[la ln]] {:latitude la :longitude ln}) 
                                 (apply concat (map #(get angle-map %) angles)))]
 
+        ;; 2. Отримання висот
         (-> (js/fetch (str API-URL "/elevation")
                       (clj->js {:method "POST" 
                                 :headers {"Content-Type" "application/json"} 
@@ -150,40 +149,39 @@
                      (let [all-elevations (map #(.-elevation %) (.-results data))
                            chunked-elevs (partition (inc num-points) all-elevations)]
                        
-                       ;; Відправляємо запит на перевірку профілів (batch processing)
-                       (-> (js/fetch (str API-URL "/check-profile-batch") ;; Якщо сервер підтримує батч
+                       ;; 3. Отримання видимості (передаємо dist)
+                       (-> (js/fetch (str API-URL "/check-profile-batch")
                                      (clj->js {:method "POST"
                                                :headers {"Content-Type" "application/json"}
                                                :body (js/JSON.stringify (clj->js {:elevations_list chunked-elevs 
-                                                                                :h1 h-base :h2 h-user :freq freq}))}))
+                                                                                :h1 h-base :h2 h-user :freq freq
+                                                                                :dist dist-m}))})) ;; передача дистанції
                            (.then (fn [res] (.json res)))
-                          (.then (fn [results]
-         (let [res-clj (js->clj results :keywordize-keys true)
-               ;; Додаємо символ підкреслення '_', щоб не було помилки синтаксису
-               _ (reset! last-scan-results {:lat lat :lng lng :results res-clj :params {:h1 h-base :h2 h-user :dist dist :freq freq}})
-               
-               ;; Збираємо крайні точки для кожного кута
-               edge-points (map-indexed 
-                             (fn [idx points-info]
-                               (let [angle (nth angles idx)
-                                     path (get angle-map angle)
-                                     ;; Знаходимо останню видиму точку в промені
-                                     visible-count (count (get-visible-segment points-info))
-                                     last-idx (max 0 (dec visible-count))]
-                                 (nth path last-idx)))
-                             res-clj)
-               
-               ;; Створюємо суцільний полігон
-               poly (L/polygon (clj->js (concat [[lat lng]] edge-points)) 
-                               (clj->js {:color color 
-                                         :fillColor color 
-                                         :fillOpacity 0.4 
-                                         :weight 2 
-                                         :smoothFactor 1}))]
-           
-           (.addTo poly @rays-group)
-           (set! (.-display (.-style loader)) "none")
-           (update-legend-ui freq h-base h-user))))))))
+                           (.then (fn [results]
+                                    (let [res-clj (js->clj results :keywordize-keys true)
+                                          _ (reset! last-scan-results {:lat lat :lng lng :results res-clj :params {:h1 h-base :h2 h-user :dist dist-km :freq freq}})
+                                          
+                                          ;; Збирання точок для полігону
+                                          edge-points (map-indexed 
+                                                        (fn [idx points-info]
+                                                          (let [angle (nth angles idx)
+                                                                path (get angle-map angle)
+                                                                visible-segment (take-while :visible points-info)
+                                                                last-idx (max 0 (dec (count visible-segment)))]
+                                                            (nth path last-idx)))
+                                                        res-clj)
+                                          
+                                          ;; Створення полігону
+                                          poly (L/polygon (clj->js (concat [[lat lng]] edge-points)) 
+                                                          (clj->js {:color color 
+                                                                    :fillColor color 
+                                                                    :fillOpacity 0.4 
+                                                                    :weight 2 
+                                                                    :smoothFactor 1}))]
+                                      
+                                      (.addTo poly @rays-group)
+                                      (set! (.-display (.-style loader)) "none")
+                                      (update-legend-ui freq h-base h-user))))))))
             (.catch (fn [err]
                       (set! (.-display (.-style loader)) "none")
                       (js/alert (str "Помилка: " (.-message err))))))))))
