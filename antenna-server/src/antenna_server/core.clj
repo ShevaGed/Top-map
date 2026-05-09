@@ -172,6 +172,25 @@
       {:status 500
        :body (json/generate-string {:error (.getMessage e)})})))
 
+(defn check-profile-batch-handler [request]
+  (try
+    (let [body (json/parse-string (slurp (:body request)) true)
+          ;; elevations_list — це список списків висот для кожного променя
+          {elevs-list :elevations_list h1 :h1 h2 :h2 freq :freq} body
+          freq-val (or freq 140)
+          ;; Обробляємо кожен промінь через нашу існуючу логіку
+          results (mapv #(check-visibility % h1 h2 freq-val) elevs-list)]
+      
+      (log/info (str "Запит /check-profile-batch: променів=" (count elevs-list)))
+      
+      {:status 200
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string results)})
+    (catch Exception e
+      (log/error e "ПОМИЛКА НА СЕРВЕРІ (batch профіль)")
+      {:status 500
+       :body (json/generate-string {:error (.getMessage e)})})))
+
 (defn save-scan-handler [request]
   (try
     (let [body (json/parse-string (slurp (:body request)))]
@@ -422,9 +441,10 @@
 ;; ---- Routes ---------------------------------------------------------
 
 (def routes
-  [["/"                 {:get    index-handler}]
+  [["/"                {:get    index-handler}]
    ["/calculate"        {:get    calculate-handler}]
    ["/check-profile"    {:post   check-profile-handler}]
+   ["/check-profile-batch" {:post check-profile-batch-handler}] ;; ДОДАЙ ЦЕЙ РЯДОК
    ["/save-scan"        {:post   save-scan-handler}]
    ["/history"          {:get    history-handler}]
    ["/delete-scan/:id"  {:delete delete-scan-handler}]
