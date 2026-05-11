@@ -93,16 +93,19 @@
     (jdbc/execute! ds ["DELETE FROM antenna_scans WHERE id = ?" id])))
 
 ;; 1. Функція перевірки видимості (додано параметр freq)
-(defn check-visibility [elevations h1 h2 freq dist-m] ;; додали dist-m
+(defn check-visibility [elevations h1 h2 freq dist-m]
   (if (and (seq elevations) h1 h2)
     (let [n (count elevations)
           e-list (map double elevations)
-          dist-total (double (or dist-m 45000.0)) ;; використовуємо передану дистанцію
+          dist-total (double (or dist-m 45000.0))
           step-dist (/ dist-total (max 1 (dec n)))
 
-          k 1.33
+          k 1.33 ;; Врахування рефракції атмосфери (викривлення променя до землі)
           earth-radius (* 6371000.0 k)
-          diffraction-margin (if (< freq 300) 4.0 1.0)
+          
+          ;; МАРЖА ДИФРАКЦІЇ: ми дозволяємо землі "заходити" на промінь на 2 метри
+          ;; Це імітує те, як низькочастотний сигнал огинає верхівки дерев чи пагорбів.
+          diffraction-margin -2.0 
 
           start-h (+ (first e-list) (double h1))
           end-h (+ (last e-list) (double h2))
@@ -112,12 +115,16 @@
                      (let [ray-h (+ start-h (* idx step-h))
                            distance-from-start (* idx step-dist)
                            distance-from-end (- dist-total distance-from-start)
+                           
+                           ;; Вигин землі
                            drop-m (/ (* distance-from-start distance-from-end)
                                      (* 2 earth-radius))
 
                            effective-ray-h (- ray-h drop-m)
-                           is-visible (> (+ effective-ray-h diffraction-margin) ground-h)]
-                       {:dist (* idx step-dist) ;; повертаємо реальну дистанцію в метрах
+                           
+                           ;; Зв'язок є, навіть якщо промінь на 2 метри нижче за верхівку (дифракція)
+                           is-visible (> (+ effective-ray-h 2.0) ground-h)]
+                       {:dist (* idx step-dist)
                         :ground ground-h
                         :ray effective-ray-h
                         :visible is-visible}))
