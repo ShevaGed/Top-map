@@ -228,11 +228,30 @@
                              (let [ring (.circle js/L (clj->js [lat lng])
                                                  (clj->js {:radius    (* zone-km 1000)
                                                            :color     color
-                                                           :weight    1
-                                                           :opacity   0.5
+                                                           :weight    2
+                                                           :opacity   0.85
                                                            :fill      false
-                                                           :dashArray "8, 6"}))]
+                                                           :dashArray "10, 6"}))]
                                (.addTo ring @radio-layers)))
+
+                           ;; Підпис висоти під маркером рації
+                           (let [radio-elev (first (first chunked-elevs))
+                                 radio-label-str (str (js/Math.round radio-elev) "м")
+                                 radio-label (.marker js/L (clj->js [lat lng])
+                                                      (clj->js {:icon (.divIcon js/L
+                                                                               (clj->js {:className ""
+                                                                                         :html (str "<div style='"
+                                                                                                    "font-size:11px;"
+                                                                                                    "font-weight:bold;"
+                                                                                                    "color:#2c3e50;"
+                                                                                                    "text-shadow:0 0 3px white,0 0 3px white;"
+                                                                                                    "white-space:nowrap;"
+                                                                                                    "margin-top:8px;"
+                                                                                                    "margin-left:-12px;"
+                                                                                                    "'>📻 " radio-label-str "</div>")
+                                                                                         :iconAnchor [0 0]}))
+                                                               :interactive false}))]
+                             (.addTo radio-label @radio-layers))
 
                            ;; Точки пагорбів з підписом висоти
                            (doseq [pt selected]
@@ -460,7 +479,7 @@
         satellite (L/tileLayer "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" 
                               (clj->js {:attribution "Esri Satellite"}))
         
-        my-map (-> (.map js/L "map-id" (clj->js {:center [50.0 36.2] :zoom 11 :layers [topo]})))]
+        my-map (-> (.map js/L "map-id" (clj->js {:center [50.0 36.2] :zoom 11 :layers [topo] :attributionControl false})))]
 
     ;; КРИТИЧНО: Зберігаємо екземпляр карти в атом, щоб інші функції (як flyTo) могли його дістати
     (reset! map-state my-map)
@@ -484,6 +503,14 @@
 
     (reset! rays-group (-> (.layerGroup js/L) (.addTo my-map)))
 
+    ;; Лінійка масштабу
+    (-> (.control.scale js/L (clj->js {:position "bottomright" :metric true :imperial false}))
+        (.addTo my-map))
+
+    ;; Лінійка масштабу
+    (-> (.control.scale js/L (clj->js {:position "bottomright" :metric true :imperial false}))
+        (.addTo my-map))
+
     (.on my-map "click" 
          (fn [e] 
            (let [lat (.-lat (.-latlng e))
@@ -495,4 +522,43 @@
 
     (setup-ui-events)
     (fetch-history)
+
+    ;; Підказка висоти під мишкою
+    (let [tooltip (js/document.createElement "div")]
+      (set! (.-id tooltip) "elevation-tooltip")
+      (.appendChild (.-body js/document) tooltip)
+
+      ;; Дебаунс щоб не спамити запитами
+      (let [timer (atom nil)]
+        (.on my-map "mousemove"
+             (fn [e]
+               (let [x (.-clientX (.-originalEvent e))
+                     y (.-clientY (.-originalEvent e))]
+                 ;; Показуємо tooltip одразу поруч з курсором
+                 (set! (.-display (.-style tooltip)) "block")
+                 (set! (.-left (.-style tooltip)) (str (+ x 15) "px"))
+                 (set! (.-top  (.-style tooltip)) (str (- y 10) "px"))
+                 ;; Дебаунс 150мс — не запитуємо при кожному пікселі
+                 (when @timer (js/clearTimeout @timer))
+                 (reset! timer
+                   (js/setTimeout
+                     (fn []
+                       (let [lat (.-lat (.-latlng e))
+                             lng (.-lng (.-latlng e))]
+                         (-> (js/fetch (str API-URL "/elevation")
+                                       (clj->js {:method "POST"
+                                                 :headers {"Content-Type" "application/json"}
+                                                 :body (js/JSON.stringify
+                                                         (clj->js {:locations [{:latitude lat :longitude lng}]}))}))
+                             (.then (fn [r] (.json r)))
+                             (.then (fn [d]
+                                      (let [elev (.-elevation (aget (.-results d) 0))]
+                                        (set! (.-innerHTML tooltip)
+                                              (str "⛰ " (js/Math.round elev) " м"))))))))
+                     150)))))
+        (.on my-map "mouseout"
+             (fn [_]
+               (set! (.-display (.-style tooltip)) "none")
+               (when @timer (js/clearTimeout @timer))))))
+
     (js/console.log "Система готова.")))

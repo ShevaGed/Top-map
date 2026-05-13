@@ -192,11 +192,35 @@ body, html {
     border-radius: 2px;
 }
 
-/* 8. Атрибуція Leaflet (щоб не заважала легенді) */
-.leaflet-bottom.leaflet-right .leaflet-control-attribution {
-    margin: 0 10px 5px 0 !important;
-    background: rgba(255, 255, 255, 0.7) !important;
-    font-size: 10px;
+/* 8. Атрибуція Leaflet — приховуємо повністю */
+.leaflet-control-attribution {
+    display: none !important;
+}
+
+/* Лінійка масштабу — розміщуємо праворуч внизу */
+.leaflet-bottom.leaflet-left .leaflet-control-scale {
+    margin-left: 0 !important;
+    margin-bottom: 8px !important;
+}
+.leaflet-bottom.leaflet-right .leaflet-control-scale {
+    margin-right: 180px !important;
+    margin-bottom: 8px !important;
+}
+
+/* Підказка висоти під мишкою */
+#elevation-tooltip {
+    position: absolute;
+    background: rgba(44, 62, 80, 0.85);
+    color: #ecf0f1;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: bold;
+    pointer-events: none;
+    z-index: 2000;
+    display: none;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
 }
 
 .history-row:hover {
