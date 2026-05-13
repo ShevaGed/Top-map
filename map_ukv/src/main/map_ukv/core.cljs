@@ -3,7 +3,9 @@
             [clojure.string :as str]))
 
 (defonce map-state (atom nil))
-(defonce markers (atom [])) ; Тепер тут буде список маркерів
+(defonce markers (atom [])) ; Маркери антен (максимум 2)
+(defonce radio-marker (atom nil)) ; Маркер рації (тільки один)
+(defonce radio-layers (atom nil)) ; Шар з колами пагорбів для рації
 (defonce rays-group (atom nil)) ; Група для всіх ліній «зірки»
 (defonce antenna-pos (atom nil))
 (defonce legend-ui (atom nil))
@@ -117,33 +119,41 @@
   (let [h-base     (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
         h-user     (js/parseFloat (.-value (js/document.getElementById "user-height")))
         dist-km    (js/parseFloat (.-value (js/document.getElementById "scan-dist")))
-        dist-m     (* dist-km 1000) ;; переводимо в метри для бекенду
+        dist-m     (* dist-km 1000)
         freq       (js/parseInt (.-value (js/document.getElementById "freq-select")))
         loader     (js/document.getElementById "loader")
         reverse-mode? (.-checked (js/document.getElementById "mode-toggle"))
-        ;; Reverse mode: 360 променів по 1°, крок ~1км (достатньо для пагорбів)
-        ;; Звичайний режим: 120 променів по 3°, крок ~400м
         angles     (if reverse-mode? (range 0 360 1) (range 0 361 3))
         num-points (if reverse-mode?
-                     ;; крок ~1км — знаходимо пагорби, не потрібна висока точність
                      (-> (/ dist-km 1.0) (js/Math.max 20) (js/Math.min 50) js/Math.round)
                      (-> (/ dist-km 0.4) (js/Math.max 20) (js/Math.min 150) js/Math.round))
         h1 h-base
         h2 h-user]
 
     (when (validate-params h-base h-user dist-km freq)
-      ;; Очищення попередніх маркерів та ліній
-      (when (>= (count @markers) 2)
-        (.clearLayers @rays-group)
-        (doseq [m @markers] (.remove m))
-        (reset! markers [])
-        (reset! boundary-points {}))
+
+      (if reverse-mode?
+        ;; === РЕЖИМ РАЦІЇ: один маркер, замінюємо попередній ===
+        (do
+          (when @radio-marker (.remove @radio-marker))
+          (when @radio-layers (.clearLayers @radio-layers))
+          (reset! radio-layers (-> (.layerGroup js/L) (.addTo my-map)))
+          (reset! radio-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon}))
+                                   (.addTo my-map))))
+        ;; === РЕЖИМ АНТЕНИ: максимум 2, рація не зникає ===
+        (do
+          (when (>= (count @markers) 2)
+            (.clearLayers @rays-group)
+            (doseq [m @markers] (.remove m))
+            (reset! markers [])
+            (reset! boundary-points {}))))
 
       (set! (.-display (.-style loader)) "block")
 
-      (let [new-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon})) 
-                           (.addTo my-map))
-            _ (swap! markers conj new-marker)
+      (let [new-marker (when (not reverse-mode?)
+                         (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon}))
+                             (.addTo my-map)))
+            _ (when new-marker (swap! markers conj new-marker))
             marker-id (count @markers)
             color (if reverse-mode? "#8e44ad"
                     (if (= marker-id 1) "#3498db" "#e67e22"))
@@ -165,46 +175,93 @@
                        
                        ;; 3. Отримання видимості / пошук пагорбів
                        (if reverse-mode?
-                         ;; === REVERSE MODE: топ-30 найвищих пагорбів ===
-                         ;; Фронтенд сам знаходить топ-30 точок з мінімальною відстанню 1км
-                         ;; без зайвого запиту на бекенд
-                         (let [all-paths (map #(get angle-map %) angles)
-                               ;; Збираємо всі точки: [висота lat lng]
-                               all-pts   (mapcat
-                                           (fn [path elevs]
-                                             (map (fn [[la ln] e] {:elev e :lat la :lng ln})
-                                                  path elevs))
-                                           all-paths chunked-elevs)
-                               ;; Сортуємо за висотою
-                               sorted    (sort-by :elev > all-pts)
-                               ;; Жадібний відбір: мінімум 1км між точками
-                               min-d     1000.0
-                               selected  (reduce
-                                           (fn [acc pt]
-                                             (if (>= (count acc) 30)
-                                               (reduced acc)
-                                               (if (every? (fn [s]
-                                                             (let [dlat (- (:lat pt) (:lat s))
-                                                                   dlng (- (:lng pt) (:lng s))
-                                                                   ;; Груба відстань в метрах
-                                                                   dm   (js/Math.sqrt
-                                                                          (+ (* dlat dlat 1.23e10)
-                                                                             (* dlng dlng 7.5e9)))]
-                                                               (> dm min-d)))
-                                                           acc)
-                                                 (conj acc pt)
-                                                 acc)))
-                                           []
-                                           sorted)]
+                         ;; === REVERSE MODE: пагорби по зонах ===
+                         ;; 0-10км  — пропускаємо
+                         ;; 10-20км — 15 найвищих точок, мін 5км між ними
+                         ;; 20-30км — 15 найвищих точок, мін 5км між ними
+                         ;; 30-40км — 15 найвищих точок, мін 5км між ними
+                         ;; 40-50км — 15 найвищих точок, мін 5км між ними
+                         (let [all-paths  (map #(get angle-map %) angles)
+                               n-pts      num-points
+                               step-km    (/ dist-km n-pts)
+                               min-d-m    5000.0  ;; мінімум 5км між точками
+
+                               ;; Збираємо всі точки з відстанню від центру
+                               all-pts    (mapcat
+                                            (fn [path elevs]
+                                              (map-indexed
+                                                (fn [i [la ln]]
+                                                  {:elev (nth elevs i 0)
+                                                   :lat  la :lng ln
+                                                   :dist-km (* i step-km)})
+                                                path))
+                                            all-paths chunked-elevs)
+
+                               ;; Жадібний відбір для однієї зони
+                               pick-zone  (fn [pts n]
+                                            (reduce
+                                              (fn [acc pt]
+                                                (if (>= (count acc) n)
+                                                  (reduced acc)
+                                                  (if (every? (fn [s]
+                                                                (let [dlat (- (:lat pt) (:lat s))
+                                                                      dlng (- (:lng pt) (:lng s))
+                                                                      dm   (js/Math.sqrt
+                                                                             (+ (* dlat dlat 1.23e10)
+                                                                                (* dlng dlng 7.5e9)))]
+                                                                  (> dm min-d-m)))
+                                                              acc)
+                                                    (conj acc pt)
+                                                    acc)))
+                                              []
+                                              (sort-by :elev > pts)))
+
+                               ;; Ділимо на зони і відбираємо
+                               zone1 (pick-zone (filter #(and (>= (:dist-km %) 10) (< (:dist-km %) 20)) all-pts) 15)
+                               zone2 (pick-zone (filter #(and (>= (:dist-km %) 20) (< (:dist-km %) 30)) all-pts) 15)
+                               zone3 (pick-zone (filter #(and (>= (:dist-km %) 30) (< (:dist-km %) 40)) all-pts) 15)
+                               zone4 (pick-zone (filter #(and (>= (:dist-km %) 40) (<= (:dist-km %) 50)) all-pts) 15)
+                               selected (concat zone1 zone2 zone3 zone4)]
+
+                           ;; Штрихпунктирні кільця зон (10, 20, 30, 40, 50 км)
+                           (doseq [zone-km [10 20 30 40 50]]
+                             (let [ring (.circle js/L (clj->js [lat lng])
+                                                 (clj->js {:radius    (* zone-km 1000)
+                                                           :color     color
+                                                           :weight    1
+                                                           :opacity   0.5
+                                                           :fill      false
+                                                           :dashArray "8, 6"}))]
+                               (.addTo ring @radio-layers)))
+
+                           ;; Точки пагорбів з підписом висоти
                            (doseq [pt selected]
-                             (.addTo (.circle js/L
-                                              (clj->js [(:lat pt) (:lng pt)])
-                                              (clj->js {:radius 400
-                                                        :color color
-                                                        :fillColor color
-                                                        :fillOpacity 0.85
-                                                        :weight 0}))
-                                     @rays-group))
+                             (let [elev-label (str (js/Math.round (:elev pt)) "м")
+                                   circle (.circle js/L
+                                                   (clj->js [(:lat pt) (:lng pt)])
+                                                   (clj->js {:radius      450
+                                                             :color       color
+                                                             :fillColor   color
+                                                             :fillOpacity 0.85
+                                                             :weight      0}))
+                                   label  (.marker js/L
+                                                   (clj->js [(:lat pt) (:lng pt)])
+                                                   (clj->js {:icon (.divIcon js/L
+                                                                             (clj->js {:className ""
+                                                                                       :html (str "<div style='"
+                                                                                                  "font-size:10px;"
+                                                                                                  "font-weight:bold;"
+                                                                                                  "color:#4a235a;"
+                                                                                                  "text-shadow:0 0 3px white,0 0 3px white;"
+                                                                                                  "white-space:nowrap;"
+                                                                                                  "margin-top:6px;"
+                                                                                                  "margin-left:-10px;"
+                                                                                                  "'>" elev-label "</div>")
+                                                                                       :iconAnchor [0 0]}))
+                                                             :interactive false}))]
+                               (.addTo circle @radio-layers)
+                               (.addTo label  @radio-layers)))
+
                            (set! (.-display (.-style loader)) "none")
                            (update-legend-ui freq h-base h-user reverse-mode?))
 
@@ -334,6 +391,10 @@
                            (doseq [m @markers] (.remove m))
                            (reset! markers [])
                            (reset! boundary-points {})
+                           (when @radio-marker (.remove @radio-marker))
+                           (when @radio-layers (.clearLayers @radio-layers))
+                           (reset! radio-marker nil)
+                           (reset! radio-layers nil)
                            (let [legend-div (js/document.getElementById "dynamic-legend")]
                              (when legend-div
                                (set! (.-innerHTML legend-div) "Клікніть на карту для розрахунку"))))))
