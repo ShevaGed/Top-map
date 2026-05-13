@@ -131,6 +131,123 @@
                    e-list))
     []))
 
+;; Reverse mode: для кожної точки i на промені перевіряємо чи вона "бачить" ціль у центрі.
+;; Алгоритм: беремо підмасив висот [0..i], перевертаємо (антена=точка i, ціль=центр),
+;; і перевіряємо чи є хоч одна точка де промінь нижче за рельєф (blocked).
+;; Якщо blocked = false для ВСІХ проміжних точок — зв'язок є.
+(defn check-visibility-reverse [elevations h-target h-antenna freq dist-m]
+  (if (and (seq elevations) h-target h-antenna)
+    (let [n          (count elevations)
+          e-vec      (mapv double elevations)
+          dist-total (double (or dist-m 45000.0))
+          step-dist  (/ dist-total (max 1 (dec n)))
+          k          1.33
+          earth-r    (* 6371000.0 k)]
+
+      (map-indexed
+        (fn [i _]
+          (if (zero? i)
+            {:dist 0.0 :visible false} ;; центр = ціль, не антена
+            (let [sub-dist  (* i step-dist)
+                  ;; Підмасив [0..i] перевернутий: [0]=антена(точка i), [last]=ціль(центр)
+                  sub-elevs (vec (reverse (subvec e-vec 0 (inc i))))
+                  sub-n     (count sub-elevs)
+
+                  ;; Абсолютні висоти початку (антена) і кінця (ціль)
+                  start-h   (+ (first sub-elevs) (double h-antenna))
+                  end-h     (+ (last sub-elevs)  (double h-target))
+                  step-h    (/ (- end-h start-h) (max 1 (dec sub-n)))
+
+                  ;; Перевіряємо кожну проміжну точку
+                  blocked?  (some
+                              (fn [j]
+                                (let [ground-h  (nth sub-elevs j)
+                                      ray-h     (+ start-h (* j step-h))
+                                      d-ant     (* j (/ sub-dist (max 1 (dec sub-n))))
+                                      d-tgt     (- sub-dist d-ant)
+                                      drop-m    (/ (* d-ant d-tgt) (* 2 earth-r))
+                                      eff-ray-h (- ray-h drop-m)]
+                                  ;; Заблоковано якщо рельєф вищий за промінь (з урахуванням дифракції 2м)
+                                  (not (> (+ eff-ray-h 2.0) ground-h))))
+                              (range 1 (dec sub-n)))]
+
+              {:dist sub-dist :visible (not (boolean blocked?))})))
+        e-vec))
+    []))
+
+(defn check-profile-reverse-handler [request]
+  (try
+    (let [body          (json/parse-string (slurp (:body request)) true)
+          {:keys [elevations_list h1 h2 freq dist]} body
+          freq-val      (or freq 140)
+          ;; h1 = висота щогли (потенційна антена на краю)
+          ;; h2 = висота рації (ціль у центрі)
+          results       (mapv #(check-visibility-reverse % h2 h1 freq-val dist)
+                              elevations_list)]
+      (log/info (str "Запит /check-profile-reverse: променів=" (count elevations_list) " dist=" dist))
+      {:status 200
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string results)})
+    (catch Exception e
+      (log/error e "ПОМИЛКА НА СЕРВЕРІ (reverse batch)")
+      {:status 500
+       :body (json/generate-string {:error (.getMessage e)})})))
+
+
+;; Алгоритм "горизонту" для reverse mode.
+;; Для кожної точки на промені рахуємо кут підйому від рації до цієї точки.
+;; Якщо кут більший за всі попередні (max-angle) — точка ВИДИМА (вона "вище горизонту").
+;; Враховується: висота рації (h-user), висота щогли на потенційній позиції (h-antenna),
+;; кривизна землі з рефракцією (k=1.33), дифракційна маржа.
+(defn check-horizon [elevations h-user h-antenna dist-m]
+  (if (and (seq elevations) h-user h-antenna)
+    (let [n          (count elevations)
+          e-vec      (mapv double elevations)
+          dist-total (double (or dist-m 45000.0))
+          step-dist  (/ dist-total (max 1 (dec n)))
+          k          1.33
+          earth-r    (* 6371000.0 k)
+          ;; Абсолютна висота рації (точка відліку кутів)
+          radio-h    (+ (first e-vec) (double h-user))]
+
+      (loop [i        1
+             max-ang  -9999999.0  ;; початково -∞
+             results  [{:dist 0.0 :visible false}]] ;; точка рації — не антена
+
+        (if (>= i n)
+          results
+          (let [d          (* i step-dist)
+                ground-h   (nth e-vec i)
+                ;; Поправка на кривизну землі з рефракцією
+                drop-m     (/ (* d (- dist-total d)) (* 2 earth-r))
+                ;; Ефективна висота верхівки щогли в точці i з урахуванням кривизни
+                top-h      (- (+ ground-h (double h-antenna)) drop-m)
+                ;; Кут підйому від рації до верхівки щогли (в радіанах, але нам важливо тільки порівняння)
+                angle      (/ (- top-h radio-h) d)
+                ;; Точка видима якщо її кут більший за всі попередні перешкоди
+                visible?   (> angle max-ang)
+                new-max    (if visible? angle max-ang)]
+            (recur (inc i)
+                   new-max
+                   (conj results {:dist d :visible visible?}))))))
+    []))
+
+(defn check-horizon-handler [request]
+  (try
+    (let [body          (json/parse-string (slurp (:body request)) true)
+          {:keys [elevations_list h1 h2 freq dist]} body
+          ;; h1 = висота рації (ціль), h2 = висота щогли (потенційна антена)
+          results       (mapv #(check-horizon % h1 h2 dist)
+                              elevations_list)]
+      (log/info (str "Запит /check-horizon: променів=" (count elevations_list) " dist=" dist))
+      {:status 200
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string results)})
+    (catch Exception e
+      (log/error e "ПОМИЛКА НА СЕРВЕРІ (horizon)")
+      {:status 500
+       :body (json/generate-string {:error (.getMessage e)})})))
+
 (def cors-headers
   {"Access-Control-Allow-Origin" "*"
    "Access-Control-Allow-Methods" "POST, GET, DELETE, OPTIONS"
@@ -393,7 +510,9 @@
   [["/"                {:get    index-handler}]
    ["/calculate"        {:get    calculate-handler}]
    ["/check-profile"    {:post   check-profile-handler}]
-   ["/check-profile-batch" {:post check-profile-batch-handler}] ;; ДОДАЙ ЦЕЙ РЯДОК
+   ["/check-profile-batch" {:post check-profile-batch-handler}]
+   ["/check-profile-reverse" {:post check-profile-reverse-handler}]
+   ["/check-horizon"          {:post check-horizon-handler}]
    ["/save-scan"        {:post   save-scan-handler}]
    ["/history"          {:get    history-handler}]
    ["/delete-scan/:id"  {:delete delete-scan-handler}]

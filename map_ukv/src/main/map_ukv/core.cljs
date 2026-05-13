@@ -78,17 +78,22 @@
 (defn get-visible-segment [points-info]
   (take-while :visible points-info))
 
-(defn update-legend-ui [freq h-base h-user]
-  (let [legend-div (js/document.getElementById "dynamic-legend")]
+(defn update-legend-ui [freq h-base h-user reverse-mode?]
+  (let [legend-div (js/document.getElementById "dynamic-legend")
+        mode-label (if reverse-mode? "🔁 Reverse Mode" "📡 Покриття")
+        mode-color (if reverse-mode? "#8e44ad" "#3498db")
+        desc       (if reverse-mode?
+                     (str "Ціль: " h-user "м | Потенційна антена: " h-base "м")
+                     (str "Щогла: " h-base "м | Приймач: " h-user "м"))]
     (when legend-div
       (set! (.-innerHTML legend-div) 
             (str "<div style='text-align:center;'>
-                    <strong style='color:#2c3e50;'>Поточні параметри</strong><br>
+                    <strong style='color:#2c3e50;'>" mode-label "</strong><br>
                     <div style='margin:5px 0;'>
-                       <span style='background:#3498db; color:white; padding:2px 6px; border-radius:3px; font-size:12px; font-weight:bold;'>" 
+                       <span style='background:" mode-color "; color:white; padding:2px 6px; border-radius:3px; font-size:12px; font-weight:bold;'>" 
                        freq " MHz</span>
                     </div>
-                    <small style='color:#7f8c8d;'>Щогла: " h-base "м | Приймач: " h-user "м</small>
+                    <small style='color:#7f8c8d;'>" desc "</small>
                   </div>")))))
 
 (defn validate-params [h-base h-user dist freq]
@@ -115,8 +120,16 @@
         dist-m     (* dist-km 1000) ;; переводимо в метри для бекенду
         freq       (js/parseInt (.-value (js/document.getElementById "freq-select")))
         loader     (js/document.getElementById "loader")
-        angles     (range 0 361 3)
-        num-points (-> (/ dist-km 0.4) (js/Math.max 20) (js/Math.min 150) js/Math.round)]
+        reverse-mode? (.-checked (js/document.getElementById "mode-toggle"))
+        ;; Reverse mode: 360 променів по 1°, крок ~1км (достатньо для пагорбів)
+        ;; Звичайний режим: 120 променів по 3°, крок ~400м
+        angles     (if reverse-mode? (range 0 360 1) (range 0 361 3))
+        num-points (if reverse-mode?
+                     ;; крок ~1км — знаходимо пагорби, не потрібна висока точність
+                     (-> (/ dist-km 1.0) (js/Math.max 20) (js/Math.min 50) js/Math.round)
+                     (-> (/ dist-km 0.4) (js/Math.max 20) (js/Math.min 150) js/Math.round))
+        h1 h-base
+        h2 h-user]
 
     (when (validate-params h-base h-user dist-km freq)
       ;; Очищення попередніх маркерів та ліній
@@ -132,7 +145,8 @@
                            (.addTo my-map))
             _ (swap! markers conj new-marker)
             marker-id (count @markers)
-            color (if (= marker-id 1) "#3498db" "#e67e22")
+            color (if reverse-mode? "#8e44ad"
+                    (if (= marker-id 1) "#3498db" "#e67e22"))
             
             ;; 1. Розрахунок геометрії променів
             angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist-km a) num-points)]) angles))
@@ -149,43 +163,83 @@
                      (let [all-elevations (map #(.-elevation %) (.-results data))
                            chunked-elevs (partition (inc num-points) all-elevations)]
                        
-                       ;; 3. Отримання видимості (передаємо dist)
-                       (-> (js/fetch (str API-URL "/check-profile-batch")
-                                     (clj->js {:method "POST"
-                                               :headers {"Content-Type" "application/json"}
-                                               :body (js/JSON.stringify (clj->js {:elevations_list chunked-elevs 
-                                                                                :h1 h-base :h2 h-user :freq freq
-                                                                                :dist dist-m}))})) ;; передача дистанції
-                           (.then (fn [res] (.json res)))
-                           (.then (fn [results]
-                                    (let [res-clj (js->clj results :keywordize-keys true)
-                                          _ (reset! last-scan-results {:lat lat :lng lng :results res-clj :params {:h1 h-base :h2 h-user :dist dist-km :freq freq}})
-                                          
-                                          ;; Збирання точок для полігону
-                                          edge-points (map-indexed 
-                                                        (fn [idx points-info]
-                                                          (let [angle (nth angles idx)
-                                                                path (get angle-map angle)
-                                                                visible-segment (take-while :visible points-info)
-                                                                last-idx (max 0 (dec (count visible-segment)))]
-                                                            (nth path last-idx)))
-                                                        res-clj)
-                                          
-                                          ;; Створення полігону
-                                          poly (L/polygon (clj->js (concat [[lat lng]] edge-points)) 
-                                                          (clj->js {:color color 
-                                                                    :fillColor color 
-                                                                    :fillOpacity 0.4 
-                                                                    :weight 2 
-                                                                    :smoothFactor 1}))]
-                                      
-                                      (.addTo poly @rays-group)
-                                      (set! (.-display (.-style loader)) "none")
-                                      (update-legend-ui freq h-base h-user))))))))
-            (.catch (fn [err]
-                      (set! (.-display (.-style loader)) "none")
-                      (js/alert (str "Помилка: " (.-message err))))))))))
+                       ;; 3. Отримання видимості / пошук пагорбів
+                       (if reverse-mode?
+                         ;; === REVERSE MODE: топ-30 найвищих пагорбів ===
+                         ;; Фронтенд сам знаходить топ-30 точок з мінімальною відстанню 1км
+                         ;; без зайвого запиту на бекенд
+                         (let [all-paths (map #(get angle-map %) angles)
+                               ;; Збираємо всі точки: [висота lat lng]
+                               all-pts   (mapcat
+                                           (fn [path elevs]
+                                             (map (fn [[la ln] e] {:elev e :lat la :lng ln})
+                                                  path elevs))
+                                           all-paths chunked-elevs)
+                               ;; Сортуємо за висотою
+                               sorted    (sort-by :elev > all-pts)
+                               ;; Жадібний відбір: мінімум 1км між точками
+                               min-d     1000.0
+                               selected  (reduce
+                                           (fn [acc pt]
+                                             (if (>= (count acc) 30)
+                                               (reduced acc)
+                                               (if (every? (fn [s]
+                                                             (let [dlat (- (:lat pt) (:lat s))
+                                                                   dlng (- (:lng pt) (:lng s))
+                                                                   ;; Груба відстань в метрах
+                                                                   dm   (js/Math.sqrt
+                                                                          (+ (* dlat dlat 1.23e10)
+                                                                             (* dlng dlng 7.5e9)))]
+                                                               (> dm min-d)))
+                                                           acc)
+                                                 (conj acc pt)
+                                                 acc)))
+                                           []
+                                           sorted)]
+                           (doseq [pt selected]
+                             (.addTo (.circle js/L
+                                              (clj->js [(:lat pt) (:lng pt)])
+                                              (clj->js {:radius 400
+                                                        :color color
+                                                        :fillColor color
+                                                        :fillOpacity 0.85
+                                                        :weight 0}))
+                                     @rays-group))
+                           (set! (.-display (.-style loader)) "none")
+                           (update-legend-ui freq h-base h-user reverse-mode?))
 
+                         ;; === ЗВИЧАЙНИЙ РЕЖИМ ===
+                         (-> (js/fetch (str API-URL "/check-profile-batch")
+                                       (clj->js {:method "POST"
+                                                 :headers {"Content-Type" "application/json"}
+                                                 :body (js/JSON.stringify (clj->js {:elevations_list chunked-elevs
+                                                                                    :h1 h-base :h2 h-user
+                                                                                    :freq freq :dist dist-m}))}))
+                             (.then (fn [res] (.json res)))
+                             (.then (fn [results]
+                                      (let [res-clj (js->clj results :keywordize-keys true)
+                                            _ (reset! last-scan-results {:lat lat :lng lng :results res-clj
+                                                                          :params {:h1 h-base :h2 h-user :dist dist-km :freq freq}})
+                                            edge-points (map-indexed
+                                                          (fn [idx points-info]
+                                                            (let [angle (nth angles idx)
+                                                                  path  (get angle-map angle)
+                                                                  visible-segment (take-while :visible points-info)
+                                                                  last-idx (max 0 (dec (count visible-segment)))]
+                                                              (nth path last-idx)))
+                                                          res-clj)
+                                            poly (L/polygon (clj->js (concat [[lat lng]] edge-points))
+                                                            (clj->js {:color color
+                                                                      :fillColor color
+                                                                      :fillOpacity 0.4
+                                                                      :weight 2
+                                                                      :smoothFactor 1}))]
+                                        (.addTo poly @rays-group)
+                                        (set! (.-display (.-style loader)) "none")
+                                        (update-legend-ui freq h-base h-user reverse-mode?))))
+                             (.catch (fn [err]
+                                       (set! (.-display (.-style loader)) "none")
+                                       (js/alert (str "Помилка: " (.-message err)))))))))))))))
 (defn render-history-table [data]
   (let [body (js/document.getElementById "history-body")]
     (when body
@@ -381,6 +435,3 @@
     (setup-ui-events)
     (fetch-history)
     (js/console.log "Система готова.")))
-
-
-
