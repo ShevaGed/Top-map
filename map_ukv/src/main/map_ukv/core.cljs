@@ -2,26 +2,58 @@
   (:require ["leaflet" :as L]
             [clojure.string :as str]))
 
+(goog-define API-URL "")
+
 (defonce map-state (atom nil))
 (defonce markers (atom [])) ; Маркери антен (максимум 2)
 (defonce radio-marker (atom nil)) ; Маркер рації (тільки один)
 (defonce radio-layers (atom nil)) ; Шар з колами пагорбів для рації
 (defonce rays-group (atom nil)) ; Група для всіх ліній «зірки»
-(defonce antenna-pos (atom nil))
 (defonce legend-ui (atom nil))
-(defonce boundary-points (atom {}))
 (defonce last-scan-results (atom nil))
+(defonce boundary-points (atom {}))
+;; ── Утилітні хелпери ──────────────────────────────────────────────────────
 
-(goog-define API-URL "")
+(defn get-ui-val
+  "Читає рядкове значення поля UI за id"
+  [id]
+  (.-value (js/document.getElementById id)))
+
+(defn post-json
+  "Надсилає POST запит з JSON тілом, повертає Promise<clj>"
+  [url body-clj]
+  (-> (js/fetch (str API-URL url)
+                (clj->js {:method "POST"
+                           :headers {"Content-Type" "application/json"}
+                           :body (js/JSON.stringify (clj->js body-clj))}))
+      (.then #(.json %))
+      (.then #(js->clj % :keywordize-keys true))))
+
+(defn make-elev-label
+  "Створює divIcon з підписом висоти для маркера"
+  [text color top-px left-px]
+  (.divIcon js/L (clj->js {:className ""
+                            :html (str "<div style='"
+                                       "font-size:10px;font-weight:bold;"
+                                       "color:" color ";"
+                                       "text-shadow:0 0 3px white,0 0 3px white;"
+                                       "white-space:nowrap;"
+                                       "margin-top:" top-px "px;"
+                                       "margin-left:" left-px "px;'>"
+                                       text "</div>")
+                            :iconAnchor [0 0]})))
+
+(defn add-to-layer
+  "Додає Leaflet об'єкт до шару"
+  [obj layer]
+  (.addTo obj layer)
+  obj)
 
 (def antenna-icon 
   (.icon js/L (clj->js {:iconUrl "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMyYzNlNTAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGQ9Ik0xMiAyTDEyIDUuNU0xMiAyMkwxMiAxMk0xMiAxMkw3IDIyTTEyIDEyTDE3IDIyTTEwIDhoNE04IDExaDhNMTEuNSAyaDEiLz48L3N2Zz4="
                         :iconSize [40 40]
                         :iconAnchor [20 40]
                         :className "antenna-icon-svg"})))
-
-(defn flatten-all-rays [rays]
-  (apply concat rays))
 
 ;; Функція для розрахунку точки на відстані та під кутом
 ;; Виправлена функція для розрахунку координат
@@ -51,34 +83,6 @@
              [(+ lat1 (* fraction (- lat2 lat1)))
               (+ lng1 (* fraction (- lng2 lng1)))]))
          (range (inc steps)))))
-
-(defn fetch-ray-visibility [path-points h]
-  (let [body-api (clj->js {:locations (map (fn [[lat lng]] {:latitude lat :longitude lng}) path-points)})]
-    (-> (js/fetch (str API-URL "/elevation")
-                  (clj->js {:method "POST" :headers {"Content-Type" "application/json"} :body (js/JSON.stringify body-api)}))
-        (.then (fn [res] (.json res)))
-        (.then (fn [data]
-                 (let [elevations (map #(.-elevation %) (.-results data))]
-                   (-> (js/fetch (str API-URL "/check-profile")
-                                 (clj->js {:method "POST"
-                                           :headers {"Content-Type" "application/json"}
-                                           :body (js/JSON.stringify (clj->js {:elevations elevations :h1 h :h2 h}))}))
-                       (.then (fn [res] (.json res)))
-                       (.then (fn [result]
-                                (let [res-clj (js->clj result :keywordize-keys true)
-                                      is-visible (every? :visible res-clj)
-                                      ;; Малюємо цей конкретный промінь
-                                      p1 (first path-points)
-                                      p2 (last path-points)
-                                      line (L/polyline (clj->js [p1 p2]) 
-                                                       (clj->js {:color (if is-visible "green" "red") 
-                                                                 :weight 2 
-                                                                 :opacity 0.6}))]
-                                  (.addTo line @rays-group)))))))))))
-
-;; Допоміжна функція: залишає тільки точки до першої перешкоди
-(defn get-visible-segment [points-info]
-  (take-while :visible points-info))
 
 (defn update-legend-ui [freq h-base h-user reverse-mode?]
   (let [legend-div (js/document.getElementById "dynamic-legend")
@@ -115,12 +119,89 @@
     :else true))
 
 
+
+;; ── Рендеринг режиму рації ────────────────────────────────────────────────
+
+(defn render-zone-rings [lat lng color layer]
+  (doseq [zone-km [10 20 30 40 50]]
+    (add-to-layer
+      (.circle js/L (clj->js [lat lng])
+               (clj->js {:radius    (* zone-km 1000)
+                         :color     color :weight 2
+                         :opacity   0.85  :fill false
+                         :dashArray "10, 6"}))
+      layer)))
+
+(defn render-radio-label [lat lng elev layer]
+  (add-to-layer
+    (.marker js/L (clj->js [lat lng])
+             (clj->js {:icon        (make-elev-label (str "📻 " (js/Math.round elev) "м")
+                                                     "#2c3e50" 8 -12)
+                       :interactive false}))
+    layer))
+
+(defn render-hill-point [pt color layer]
+  (let [lbl (str (js/Math.round (:elev pt)) "м")
+        r   (max 40 (/ 1800 (js/Math.pow 1.6 (- (.getZoom @map-state) 9))))]
+    (add-to-layer
+      (.circle js/L (clj->js [(:lat pt) (:lng pt)])
+               (clj->js {:radius r :color color :fillColor color
+                         :fillOpacity 0.85 :weight 0}))
+      layer)
+    (add-to-layer
+      (.marker js/L (clj->js [(:lat pt) (:lng pt)])
+               (clj->js {:icon (make-elev-label lbl "#4a235a" 6 -10) :interactive false}))
+      layer)))
+
+(defn pick-top-hills
+  "Жадібний відбір top-n найвищих точок з мінімумом min-d-m між ними"
+  [pts n min-d-m]
+  (reduce
+    (fn [acc pt]
+      (if (>= (count acc) n)
+        (reduced acc)
+        (if (every? (fn [s]
+                      (let [dlat (- (:lat pt) (:lat s))
+                            dlng (- (:lng pt) (:lng s))]
+                        (> (js/Math.sqrt (+ (* dlat dlat 1.23e10)
+                                           (* dlng dlng 7.5e9)))
+                           min-d-m)))
+                    acc)
+          (conj acc pt)
+          acc)))
+    []
+    (sort-by :elev > pts)))
+
+(defn select-hills-by-zones [all-pts]
+  (let [pick (fn [from to] (pick-top-hills
+                              (filter #(and (>= (:dist-km %) from) (< (:dist-km %) to)) all-pts)
+                              15 5000.0))]
+    (concat (pick 10 20) (pick 20 30) (pick 30 40)
+            ;; остання зона включно з 50
+            (pick-top-hills (filter #(and (>= (:dist-km %) 40) (<= (:dist-km %) 50)) all-pts)
+                            15 5000.0))))
+
+;; ── Рендеринг звичайного режиму ───────────────────────────────────────────
+
+(defn render-coverage-polygon [lat lng angles angle-map res-clj color]
+  (let [edge-points (map-indexed
+                      (fn [idx points-info]
+                        (let [path (get angle-map (nth angles idx))
+                              last-idx (max 0 (dec (count (take-while :visible points-info))))]
+                          (nth path last-idx)))
+                      res-clj)]
+    (add-to-layer
+      (L/polygon (clj->js (concat [[lat lng]] edge-points))
+                 (clj->js {:color color :fillColor color
+                           :fillOpacity 0.4 :weight 2 :smoothFactor 1}))
+      @rays-group)))
+
 (defn handle-map-click [lat lng my-map]
-  (let [h-base     (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
-        h-user     (js/parseFloat (.-value (js/document.getElementById "user-height")))
-        dist-km    (js/parseFloat (.-value (js/document.getElementById "scan-dist")))
+  (let [h-base     (js/parseFloat (get-ui-val "antenna-height"))
+        h-user     (js/parseFloat (get-ui-val "user-height"))
+        dist-km    (js/parseFloat (get-ui-val "scan-dist"))
         dist-m     (* dist-km 1000)
-        freq       (js/parseInt (.-value (js/document.getElementById "freq-select")))
+        freq       (js/parseInt (get-ui-val "freq-select"))
         loader     (js/document.getElementById "loader")
         reverse-mode? (.-checked (js/document.getElementById "mode-toggle"))
         angles     (if reverse-mode? (range 0 360 1) (range 0 361 3))
@@ -181,138 +262,38 @@
                          ;; 20-30км — 15 найвищих точок, мін 5км між ними
                          ;; 30-40км — 15 найвищих точок, мін 5км між ними
                          ;; 40-50км — 15 найвищих точок, мін 5км між ними
-                         (let [all-paths  (map #(get angle-map %) angles)
-                               n-pts      num-points
-                               step-km    (/ dist-km n-pts)
-                               min-d-m    5000.0  ;; мінімум 5км між точками
+                         ;; Збираємо всі точки з відстанню
+                         (let [all-paths (map #(get angle-map %) angles)
+                               step-km  (/ dist-km num-points)
+                               all-pts  (mapcat
+                                          (fn [path elevs]
+                                            (map-indexed
+                                              (fn [i [la ln]]
+                                                {:elev (nth elevs i 0) :lat la :lng ln
+                                                 :dist-km (* i step-km)})
+                                              path))
+                                          all-paths chunked-elevs)
+                               selected (select-hills-by-zones all-pts)]
 
-                               ;; Збираємо всі точки з відстанню від центру
-                               all-pts    (mapcat
-                                            (fn [path elevs]
-                                              (map-indexed
-                                                (fn [i [la ln]]
-                                                  {:elev (nth elevs i 0)
-                                                   :lat  la :lng ln
-                                                   :dist-km (* i step-km)})
-                                                path))
-                                            all-paths chunked-elevs)
-
-                               ;; Жадібний відбір для однієї зони
-                               pick-zone  (fn [pts n]
-                                            (reduce
-                                              (fn [acc pt]
-                                                (if (>= (count acc) n)
-                                                  (reduced acc)
-                                                  (if (every? (fn [s]
-                                                                (let [dlat (- (:lat pt) (:lat s))
-                                                                      dlng (- (:lng pt) (:lng s))
-                                                                      dm   (js/Math.sqrt
-                                                                             (+ (* dlat dlat 1.23e10)
-                                                                                (* dlng dlng 7.5e9)))]
-                                                                  (> dm min-d-m)))
-                                                              acc)
-                                                    (conj acc pt)
-                                                    acc)))
-                                              []
-                                              (sort-by :elev > pts)))
-
-                               ;; Ділимо на зони і відбираємо
-                               zone1 (pick-zone (filter #(and (>= (:dist-km %) 10) (< (:dist-km %) 20)) all-pts) 15)
-                               zone2 (pick-zone (filter #(and (>= (:dist-km %) 20) (< (:dist-km %) 30)) all-pts) 15)
-                               zone3 (pick-zone (filter #(and (>= (:dist-km %) 30) (< (:dist-km %) 40)) all-pts) 15)
-                               zone4 (pick-zone (filter #(and (>= (:dist-km %) 40) (<= (:dist-km %) 50)) all-pts) 15)
-                               selected (concat zone1 zone2 zone3 zone4)]
-
-                           ;; Штрихпунктирні кільця зон (10, 20, 30, 40, 50 км)
-                           (doseq [zone-km [10 20 30 40 50]]
-                             (let [ring (.circle js/L (clj->js [lat lng])
-                                                 (clj->js {:radius    (* zone-km 1000)
-                                                           :color     color
-                                                           :weight    2
-                                                           :opacity   0.85
-                                                           :fill      false
-                                                           :dashArray "10, 6"}))]
-                               (.addTo ring @radio-layers)))
-
-                           ;; Підпис висоти під маркером рації
-                           (let [radio-elev (first (first chunked-elevs))
-                                 radio-label-str (str (js/Math.round radio-elev) "м")
-                                 radio-label (.marker js/L (clj->js [lat lng])
-                                                      (clj->js {:icon (.divIcon js/L
-                                                                               (clj->js {:className ""
-                                                                                         :html (str "<div style='"
-                                                                                                    "font-size:11px;"
-                                                                                                    "font-weight:bold;"
-                                                                                                    "color:#2c3e50;"
-                                                                                                    "text-shadow:0 0 3px white,0 0 3px white;"
-                                                                                                    "white-space:nowrap;"
-                                                                                                    "margin-top:8px;"
-                                                                                                    "margin-left:-12px;"
-                                                                                                    "'>📻 " radio-label-str "</div>")
-                                                                                         :iconAnchor [0 0]}))
-                                                               :interactive false}))]
-                             (.addTo radio-label @radio-layers))
-
-                           ;; Точки пагорбів з підписом висоти
-                           (doseq [pt selected]
-                             (let [elev-label (str (js/Math.round (:elev pt)) "м")
-                                   circle (.circle js/L
-                                                   (clj->js [(:lat pt) (:lng pt)])
-                                                   (clj->js {:radius      450
-                                                             :color       color
-                                                             :fillColor   color
-                                                             :fillOpacity 0.85
-                                                             :weight      0}))
-                                   label  (.marker js/L
-                                                   (clj->js [(:lat pt) (:lng pt)])
-                                                   (clj->js {:icon (.divIcon js/L
-                                                                             (clj->js {:className ""
-                                                                                       :html (str "<div style='"
-                                                                                                  "font-size:10px;"
-                                                                                                  "font-weight:bold;"
-                                                                                                  "color:#4a235a;"
-                                                                                                  "text-shadow:0 0 3px white,0 0 3px white;"
-                                                                                                  "white-space:nowrap;"
-                                                                                                  "margin-top:6px;"
-                                                                                                  "margin-left:-10px;"
-                                                                                                  "'>" elev-label "</div>")
-                                                                                       :iconAnchor [0 0]}))
-                                                             :interactive false}))]
-                               (.addTo circle @radio-layers)
-                               (.addTo label  @radio-layers)))
+                           (render-zone-rings lat lng color @radio-layers)
+                           (render-radio-label lat lng (first (first chunked-elevs)) @radio-layers)
+                           (doseq [pt selected] (render-hill-point pt color @radio-layers))
 
                            (set! (.-display (.-style loader)) "none")
                            (update-legend-ui freq h-base h-user reverse-mode?))
 
                          ;; === ЗВИЧАЙНИЙ РЕЖИМ ===
-                         (-> (js/fetch (str API-URL "/check-profile-batch")
-                                       (clj->js {:method "POST"
-                                                 :headers {"Content-Type" "application/json"}
-                                                 :body (js/JSON.stringify (clj->js {:elevations_list chunked-elevs
-                                                                                    :h1 h-base :h2 h-user
-                                                                                    :freq freq :dist dist-m}))}))
-                             (.then (fn [res] (.json res)))
-                             (.then (fn [results]
-                                      (let [res-clj (js->clj results :keywordize-keys true)
-                                            _ (reset! last-scan-results {:lat lat :lng lng :results res-clj
-                                                                          :params {:h1 h-base :h2 h-user :dist dist-km :freq freq}})
-                                            edge-points (map-indexed
-                                                          (fn [idx points-info]
-                                                            (let [angle (nth angles idx)
-                                                                  path  (get angle-map angle)
-                                                                  visible-segment (take-while :visible points-info)
-                                                                  last-idx (max 0 (dec (count visible-segment)))]
-                                                              (nth path last-idx)))
-                                                          res-clj)
-                                            poly (L/polygon (clj->js (concat [[lat lng]] edge-points))
-                                                            (clj->js {:color color
-                                                                      :fillColor color
-                                                                      :fillOpacity 0.4
-                                                                      :weight 2
-                                                                      :smoothFactor 1}))]
-                                        (.addTo poly @rays-group)
-                                        (set! (.-display (.-style loader)) "none")
-                                        (update-legend-ui freq h-base h-user reverse-mode?))))
+                         (-> (post-json "/check-profile-batch"
+                                        {:elevations_list chunked-elevs
+                                         :h1 h-base :h2 h-user
+                                         :freq freq :dist dist-m})
+                             (.then (fn [res-clj]
+                                      (reset! last-scan-results {:lat lat :lng lng :results res-clj
+                                                                  :params {:h1 h-base :h2 h-user
+                                                                           :dist dist-km :freq freq}})
+                                      (render-coverage-polygon lat lng angles angle-map res-clj color)
+                                      (set! (.-display (.-style loader)) "none")
+                                      (update-legend-ui freq h-base h-user reverse-mode?)))
                              (.catch (fn [err]
                                        (set! (.-display (.-style loader)) "none")
                                        (js/alert (str "Помилка: " (.-message err)))))))))))))))
@@ -409,8 +390,7 @@
                            (.clearLayers @rays-group)
                            (doseq [m @markers] (.remove m))
                            (reset! markers [])
-                           (reset! boundary-points {})
-                           (when @radio-marker (.remove @radio-marker))
+                                              (when @radio-marker (.remove @radio-marker))
                            (when @radio-layers (.clearLayers @radio-layers))
                            (reset! radio-marker nil)
                            (reset! radio-layers nil)
@@ -438,9 +418,9 @@
                            (let [marker (last @markers)]
                              (if marker
                                (let [latlng (.getLatLng marker)
-                                     h1 (js/parseFloat (.-value (js/document.getElementById "antenna-height")))
-                                     h2 (js/parseFloat (.-value (js/document.getElementById "user-height")))
-                                     freq (js/parseInt (.-value (js/document.getElementById "freq-select")))]
+                                     h1 (js/parseFloat (get-ui-val "antenna-height"))
+                                     h2 (js/parseFloat (get-ui-val "user-height"))
+                                     freq (js/parseInt (get-ui-val "freq-select"))]
                                  (save-to-db (.-lat latlng) (.-lng latlng) h1 h2 freq))
                                (js/alert "Спочатку поставте антену на карту!"))))))
 
@@ -502,10 +482,6 @@
       (reset! legend-ui legend))
 
     (reset! rays-group (-> (.layerGroup js/L) (.addTo my-map)))
-
-    ;; Лінійка масштабу
-    (-> (.control.scale js/L (clj->js {:position "bottomright" :metric true :imperial false}))
-        (.addTo my-map))
 
     ;; Лінійка масштабу
     (-> (.control.scale js/L (clj->js {:position "bottomright" :metric true :imperial false}))

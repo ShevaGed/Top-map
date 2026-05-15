@@ -8,11 +8,6 @@
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [taoensso.timbre :as log])
-  (:import (java.net URI)
-           (java.net.http HttpClient HttpRequest
-                          HttpRequest$BodyPublishers
-                          HttpResponse$BodyHandlers)
-           (java.time Duration))
   (:gen-class))
 
 ;; Опис підключення до файлу бази даних та ініціалізація таблиці
@@ -131,122 +126,7 @@
                    e-list))
     []))
 
-;; Reverse mode: для кожної точки i на промені перевіряємо чи вона "бачить" ціль у центрі.
-;; Алгоритм: беремо підмасив висот [0..i], перевертаємо (антена=точка i, ціль=центр),
-;; і перевіряємо чи є хоч одна точка де промінь нижче за рельєф (blocked).
-;; Якщо blocked = false для ВСІХ проміжних точок — зв'язок є.
-(defn check-visibility-reverse [elevations h-target h-antenna freq dist-m]
-  (if (and (seq elevations) h-target h-antenna)
-    (let [n          (count elevations)
-          e-vec      (mapv double elevations)
-          dist-total (double (or dist-m 45000.0))
-          step-dist  (/ dist-total (max 1 (dec n)))
-          k          1.33
-          earth-r    (* 6371000.0 k)]
 
-      (map-indexed
-        (fn [i _]
-          (if (zero? i)
-            {:dist 0.0 :visible false} ;; центр = ціль, не антена
-            (let [sub-dist  (* i step-dist)
-                  ;; Підмасив [0..i] перевернутий: [0]=антена(точка i), [last]=ціль(центр)
-                  sub-elevs (vec (reverse (subvec e-vec 0 (inc i))))
-                  sub-n     (count sub-elevs)
-
-                  ;; Абсолютні висоти початку (антена) і кінця (ціль)
-                  start-h   (+ (first sub-elevs) (double h-antenna))
-                  end-h     (+ (last sub-elevs)  (double h-target))
-                  step-h    (/ (- end-h start-h) (max 1 (dec sub-n)))
-
-                  ;; Перевіряємо кожну проміжну точку
-                  blocked?  (some
-                              (fn [j]
-                                (let [ground-h  (nth sub-elevs j)
-                                      ray-h     (+ start-h (* j step-h))
-                                      d-ant     (* j (/ sub-dist (max 1 (dec sub-n))))
-                                      d-tgt     (- sub-dist d-ant)
-                                      drop-m    (/ (* d-ant d-tgt) (* 2 earth-r))
-                                      eff-ray-h (- ray-h drop-m)]
-                                  ;; Заблоковано якщо рельєф вищий за промінь (з урахуванням дифракції 2м)
-                                  (not (> (+ eff-ray-h 2.0) ground-h))))
-                              (range 1 (dec sub-n)))]
-
-              {:dist sub-dist :visible (not (boolean blocked?))})))
-        e-vec))
-    []))
-
-(defn check-profile-reverse-handler [request]
-  (try
-    (let [body          (json/parse-string (slurp (:body request)) true)
-          {:keys [elevations_list h1 h2 freq dist]} body
-          freq-val      (or freq 140)
-          ;; h1 = висота щогли (потенційна антена на краю)
-          ;; h2 = висота рації (ціль у центрі)
-          results       (mapv #(check-visibility-reverse % h2 h1 freq-val dist)
-                              elevations_list)]
-      (log/info (str "Запит /check-profile-reverse: променів=" (count elevations_list) " dist=" dist))
-      {:status 200
-       :headers {"Content-Type" "application/json"}
-       :body (json/generate-string results)})
-    (catch Exception e
-      (log/error e "ПОМИЛКА НА СЕРВЕРІ (reverse batch)")
-      {:status 500
-       :body (json/generate-string {:error (.getMessage e)})})))
-
-
-;; Алгоритм "горизонту" для reverse mode.
-;; Для кожної точки на промені рахуємо кут підйому від рації до цієї точки.
-;; Якщо кут більший за всі попередні (max-angle) — точка ВИДИМА (вона "вище горизонту").
-;; Враховується: висота рації (h-user), висота щогли на потенційній позиції (h-antenna),
-;; кривизна землі з рефракцією (k=1.33), дифракційна маржа.
-(defn check-horizon [elevations h-user h-antenna dist-m]
-  (if (and (seq elevations) h-user h-antenna)
-    (let [n          (count elevations)
-          e-vec      (mapv double elevations)
-          dist-total (double (or dist-m 45000.0))
-          step-dist  (/ dist-total (max 1 (dec n)))
-          k          1.33
-          earth-r    (* 6371000.0 k)
-          ;; Абсолютна висота рації (точка відліку кутів)
-          radio-h    (+ (first e-vec) (double h-user))]
-
-      (loop [i        1
-             max-ang  -9999999.0  ;; початково -∞
-             results  [{:dist 0.0 :visible false}]] ;; точка рації — не антена
-
-        (if (>= i n)
-          results
-          (let [d          (* i step-dist)
-                ground-h   (nth e-vec i)
-                ;; Поправка на кривизну землі з рефракцією
-                drop-m     (/ (* d (- dist-total d)) (* 2 earth-r))
-                ;; Ефективна висота верхівки щогли в точці i з урахуванням кривизни
-                top-h      (- (+ ground-h (double h-antenna)) drop-m)
-                ;; Кут підйому від рації до верхівки щогли (в радіанах, але нам важливо тільки порівняння)
-                angle      (/ (- top-h radio-h) d)
-                ;; Точка видима якщо її кут більший за всі попередні перешкоди
-                visible?   (> angle max-ang)
-                new-max    (if visible? angle max-ang)]
-            (recur (inc i)
-                   new-max
-                   (conj results {:dist d :visible visible?}))))))
-    []))
-
-(defn check-horizon-handler [request]
-  (try
-    (let [body          (json/parse-string (slurp (:body request)) true)
-          {:keys [elevations_list h1 h2 freq dist]} body
-          ;; h1 = висота рації (ціль), h2 = висота щогли (потенційна антена)
-          results       (mapv #(check-horizon % h1 h2 dist)
-                              elevations_list)]
-      (log/info (str "Запит /check-horizon: променів=" (count elevations_list) " dist=" dist))
-      {:status 200
-       :headers {"Content-Type" "application/json"}
-       :body (json/generate-string results)})
-    (catch Exception e
-      (log/error e "ПОМИЛКА НА СЕРВЕРІ (horizon)")
-      {:status 500
-       :body (json/generate-string {:error (.getMessage e)})})))
 
 (def cors-headers
   {"Access-Control-Allow-Origin" "*"
@@ -260,39 +140,6 @@
       (let [response (handler request)]
         (cond-> response
           response (update :headers merge cors-headers))))))
-
-(defn calculate-handler [request]
-  (try
-    (let [params (if (:query-string request)
-                   (codec/form-decode (:query-string request))
-                   {})
-          h (Double/parseDouble (get params "h" "0"))
-          elevation (Double/parseDouble (get params "elevation" "0"))
-          total-h (+ h elevation)
-          distance (* 4.12 (Math/sqrt total-h))]
-      (log/info "Запит /calculate: h =" h ", elevation =" elevation)
-      {:status 200
-       :headers {"Content-Type" "text/plain; charset=utf-8"}
-       :body (str "Радіус прямої видимості: " (format "%.2f" distance) " км.")})
-    (catch Exception e
-      (log/error e "Помилка розрахунку радіусу")
-      {:status 400 :body "Некоректні параметри"})))
-
-(defn check-profile-handler [request]
-  (try
-    (let [body (json/parse-string (slurp (:body request)) true)
-          ;; додаємо dist сюди
-          {:keys [elevations h1 h2 freq dist]} body
-          freq-val (or freq 140)
-          result (check-visibility elevations h1 h2 freq-val dist)]
-      (log/info "Запит /check-profile: точок =" (count elevations) "freq =" freq-val)
-      {:status 200
-       :headers {"Content-Type" "application/json"}
-       :body (json/generate-string result)})
-    (catch Exception e
-      (log/error e "ПОМИЛКА НА СЕРВЕРІ (профіль)")
-      {:status 500
-       :body (json/generate-string {:error (.getMessage e)})})))
 
 (defn check-profile-batch-handler [request]
   (try
@@ -355,133 +202,6 @@
   (-> (response/resource-response "public/index.html")
       (response/content-type "text/html; charset=utf-8")))
 
-;; ---- Elevation proxy: cache + adaptive backoff ----------------------
-
-(def ^String elevation-api-url "https://api.open-elevation.com/api/v1/lookup")
-;; Open-Elevation accepts up to ~1024 locations per POST; stay well under.
-(def ^:const upstream-chunk-size 500)
-;; SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999; one ? per cache key.
-(def ^:const sqlite-param-chunk 900)
-;; Quantize coords to ~11 m at the equator (SRTM grid is ~30 m anyway).
-(def ^:const quantize-factor 10000.0)
-
-(defn quantize ^double [^double v]
-  (/ (Math/round (* v quantize-factor)) quantize-factor))
-
-(defn cache-lookup [ds q-keys]
-  (if (empty? q-keys)
-    {}
-    (->> (partition-all sqlite-param-chunk (distinct q-keys))
-         (mapcat (fn [chunk]
-                   (let [placeholders (str/join "," (repeat (count chunk) "?"))
-                         sql (str "SELECT lat_q, lng_q, elevation "
-                                  "FROM elevation_cache "
-                                  "WHERE (lat_q || ',' || lng_q) IN ("
-                                  placeholders ")")
-                         params (map (fn [[lat lng]] (str lat "," lng)) chunk)]
-                     (jdbc/execute! ds (into [sql] params)
-                                    {:builder-fn rs/as-unqualified-maps}))))
-         (map (fn [{:keys [lat_q lng_q elevation]}]
-                [[lat_q lng_q] elevation]))
-         (into {}))))
-
-(defn cache-insert! [ds rows]
-  (when (seq rows)
-    (jdbc/execute-batch!
-      ds
-      "INSERT OR REPLACE INTO elevation_cache (lat_q, lng_q, elevation) VALUES (?, ?, ?)"
-      (map (fn [{:keys [lat lng elevation]}]
-             [(double lat) (double lng) (double elevation)])
-           rows)
-      {})))
-
-;; --- HTTP client (java.net.http, no extra dep) ---
-
-(defonce ^HttpClient http-client
-  (-> (HttpClient/newBuilder)
-      (.connectTimeout (Duration/ofSeconds 10))
-      (.build)))
-
-(defn http-post-json [^String url ^String body-str]
-  (let [req (-> (HttpRequest/newBuilder)
-                (.uri (URI/create url))
-                (.timeout (Duration/ofSeconds 30))
-                (.header "Content-Type" "application/json")
-                (.POST (HttpRequest$BodyPublishers/ofString body-str))
-                (.build))
-        resp (.send http-client req (HttpResponse$BodyHandlers/ofString))]
-    {:status (.statusCode resp) :body (.body resp)}))
-
-;; --- Adaptive backoff (logarithmic-feel: 0.5,1,2,4,8,16,30s cap) ---
-
-(def ^:const backoff-base-ms 500)
-(def ^:const backoff-max-ms 30000)
-(def ^:const max-upstream-attempts 4)
-
-(defn- compute-backoff-ms ^long [^long fails]
-  (if (zero? fails)
-    0
-    (long (min backoff-max-ms
-               (* backoff-base-ms (Math/pow 2 (dec fails)))))))
-
-(defonce throttle-state
-  (atom {:fails 0 :backoff-ms 0}))
-
-(defn current-backoff-ms ^long [] (:backoff-ms @throttle-state))
-
-(defn note-success! []
-  (swap! throttle-state
-         (fn [{:keys [fails]}]
-           (let [n (max 0 (dec fails))]
-             {:fails n :backoff-ms (compute-backoff-ms n)}))))
-
-(defn note-rate-limited! []
-  (swap! throttle-state
-         (fn [{:keys [fails]}]
-           (let [n (inc fails)]
-             {:fails n :backoff-ms (compute-backoff-ms n)}))))
-
-(defn- retryable-status? [status]
-  (or (= 429 status) (>= status 500) (zero? status)))
-
-(defn fetch-elevations-upstream
-  "POST one chunk of locations to Open-Elevation. Sleeps the current
-   backoff before each attempt, retries up to max-upstream-attempts on
-   429/5xx, throws ex-info on permanent failure."
-  [locations]
-  (let [body (json/generate-string {:locations locations})]
-    (loop [attempt 1]
-      (let [delay (current-backoff-ms)]
-        (when (pos? delay)
-          (log/info "Backoff sleep" delay "ms before upstream call")
-          (Thread/sleep delay)))
-      (let [{:keys [status body] :as resp}
-            (try (http-post-json elevation-api-url body)
-                 (catch Exception e
-                   (log/warn "Upstream IO error:" (.getMessage e))
-                   {:status 0 :body (.getMessage e)}))]
-        (cond
-          (= 200 status)
-          (do (note-success!)
-              (-> body (json/parse-string true) :results))
-
-          (and (retryable-status? status) (< attempt max-upstream-attempts))
-          (do (note-rate-limited!)
-              (log/warn (str "Upstream " status ", backoff now "
-                             (current-backoff-ms) "ms (attempt "
-                             attempt "/" max-upstream-attempts ")"))
-              (recur (inc attempt)))
-
-          :else
-          (do (note-rate-limited!)
-              (log/error "Upstream call failed permanently, status =" status)
-              (throw (ex-info "Upstream elevation API failed"
-                              {:status status :body body}))))))))
-
-(defn fetch-elevations-chunked [locations]
-  (->> (partition-all upstream-chunk-size locations)
-       (mapcat fetch-elevations-upstream)
-       doall))
 
 (defn elevation-handler [request]
   (try
@@ -508,11 +228,7 @@
 
 (def routes
   [["/"                {:get    index-handler}]
-   ["/calculate"        {:get    calculate-handler}]
-   ["/check-profile"    {:post   check-profile-handler}]
    ["/check-profile-batch" {:post check-profile-batch-handler}]
-   ["/check-profile-reverse" {:post check-profile-reverse-handler}]
-   ["/check-horizon"          {:post check-horizon-handler}]
    ["/save-scan"        {:post   save-scan-handler}]
    ["/history"          {:get    history-handler}]
    ["/delete-scan/:id"  {:delete delete-scan-handler}]
