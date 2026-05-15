@@ -6,6 +6,8 @@ target/
 checkouts/
 bin/
 map_ukv_data.db
+.env
+
 
 # Build outputs
 antenna-server/resources/

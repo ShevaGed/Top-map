@@ -10,32 +10,36 @@
             [taoensso.timbre :as log])
   (:gen-class))
 
-;; Опис підключення до файлу бази даних та ініціалізація таблиці
-(def db-spec {:jdbcUrl "jdbc:sqlite:map_ukv_data.db?journal_mode=WAL&busy_timeout=5000"})
+
+(def db-spec 
+  {:dbtype   "postgresql"
+   :dbname   (or (System/getenv "DB_NAME") "elevator_db")
+   :host     (or (System/getenv "DB_HOST") "localhost")
+   :user     (or (System/getenv "DB_USER") "anton")
+   :password (System/getenv "DB_PASS")}) 
 
 (defn init-db []
   (let [ds (jdbc/get-datasource db-spec)]
+    ;; Створюємо таблицю для сканувань
     (jdbc/execute! ds ["
       CREATE TABLE IF NOT EXISTS antenna_scans (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        lat REAL NOT NULL,
-        lng REAL NOT NULL,
+        id SERIAL PRIMARY KEY,
+        lat DOUBLE PRECISION NOT NULL,
+        lng DOUBLE PRECISION NOT NULL,
         h_antenna REAL,
         h_user REAL,
         freq INTEGER,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )"])
+    ;; Створюємо таблицю для кешу висот
     (jdbc/execute! ds ["
       CREATE TABLE IF NOT EXISTS elevation_cache (
-        lat_q REAL NOT NULL,
-        lng_q REAL NOT NULL,
+        lat_q DOUBLE PRECISION NOT NULL,
+        lng_q DOUBLE PRECISION NOT NULL,
         elevation REAL NOT NULL,
-        fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (lat_q, lng_q)
       )"])))
-
-;; Викликаємо створення таблиці при завантаженні файлу
-(init-db)
 
 
 (defn get-local-elevation [lat lng]
@@ -65,29 +69,32 @@
 
 (defn save-scan [scan-data]
   (let [ds (jdbc/get-datasource db-spec)]
-    (jdbc/execute! ds
-                   ["INSERT INTO antenna_scans (lat, lng, h_antenna, h_user, freq)
-        VALUES (?, ?, ?, ?, ?)"
-                    (get scan-data "lat")
-                    (get scan-data "lng")
-                    (get scan-data "h1")
-                    (get scan-data "h2")
-                    (get scan-data "freq")])))
+    (jdbc/execute-one! ds 
+      ["INSERT INTO antenna_scans (lat, lng, h_antenna, h_user, freq) 
+        VALUES (?, ?, ?, ?, ?) RETURNING id" 
+       (:lat scan-data) 
+       (:lng scan-data) 
+       (:h1 scan-data)  ;; змінено з :h_antenna
+       (:h2 scan-data)  ;; змінено з :h_user
+       (:freq scan-data)]
+      {:builder-fn rs/as-unqualified-maps})))
+
 
 (defn get-all-scans []
   (let [ds (jdbc/get-datasource db-spec)]
-    (jdbc/execute! ds ["SELECT
-                        id, lat, lng, h_antenna, h_user, freq,
-                        datetime(created_at, 'localtime') as created_at
-                        FROM antenna_scans
-                        ORDER BY created_at DESC"]
-                   {:builder-fn rs/as-unqualified-maps})))
+    (jdbc/execute! ds 
+      ["SELECT id, lat, lng, h_antenna, h_user, freq, created_at 
+        FROM antenna_scans 
+        ORDER BY created_at DESC"]
+      {:builder-fn rs/as-unqualified-maps})))
+
 
 (defn delete-scan [id]
   (let [ds (jdbc/get-datasource db-spec)]
-    (jdbc/execute! ds ["DELETE FROM antenna_scans WHERE id = ?" id])))
+    (jdbc/execute! ds ["DELETE FROM antenna_scans WHERE id = ?" (Integer/parseInt id)])))
 
-;; 1. Функція перевірки видимості (додано параметр freq)
+
+
 (defn check-visibility [elevations h1 h2 freq dist-m]
   (if (and (seq elevations) h1 h2)
     (let [n (count elevations)
@@ -164,7 +171,7 @@
 
 (defn save-scan-handler [request]
   (try
-    (let [body (json/parse-string (slurp (:body request)))]
+    (let [body (json/parse-string (slurp (:body request)) true)]
       (save-scan body)
       (log/info "Запит /save-scan: збережено нову точку")
       {:status 200
@@ -246,24 +253,23 @@
 (defn -main [& _args]
   (log/info "Вхід у головну функцію")
   
-  ;; --- Налаштування бази даних (WAL режим) ---
+  ;; 1. Спроба ініціалізації PostgreSQL
   (try
-    (let [ds (jdbc/get-datasource db-spec)]
-      (jdbc/execute! ds ["PRAGMA journal_mode=WAL;"])
-      (jdbc/execute! ds ["PRAGMA synchronous=NORMAL;"])
-      (log/info "✅ SQLite переведено в режим WAL"))
+    (init-db)
+    (log/info "✅ PostgreSQL успішно підключено та ініціалізовано")
     (catch Exception e
-      (log/error e "Помилка при налаштуванні SQLite")))
-  ;; -------------------------------------------
+      (log/error e "❌ КРИТИЧНА ПОМИЛКА: Не вдалося підключитися до PostgreSQL! Перевір базу та пароль.")))
 
+  ;; 2. Тест SRTM даних
   (let [test-h (get-local-elevation 50.45 30.52)]
     (if test-h
       (log/info "✅ ТЕСТ SRTM ПРОЙДЕНО: Висота в Києві =" test-h "м.")
-      (log/warn "❌ ТЕСТ SRTM ПРОВАЛЕНО: Файл не знайдено за шляхом antenna-server/data/srtm/N50E030.hgt")))
+      (log/warn "❌ ТЕСТ SRTM ПРОВАЛЕНО: Перевірте наявність .hgt файлів")))
   
+  ;; 3. Запуск сервера
   (let [port (Integer/parseInt (or (System/getenv "PORT") "3000"))]
     (try
       (jetty/run-jetty handler {:port port :join? false})
-      (log/info (str "Сервер успішно запущено на http://localhost:" port))
+      (log/info (str "🚀 Сервер успішно запущено на http://localhost:" port))
       (catch Exception e
         (log/error e "Не вдалося запустити сервер!")))))
