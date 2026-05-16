@@ -457,6 +457,108 @@
                  (handle-map-click lat lng @map-state))))))))))
 
 
+
+;; ── Контекстне меню ───────────────────────────────────────────────────────
+
+(defn hide-context-menu []
+  (let [menu (js/document.getElementById "map-context-menu")]
+    (when menu (set! (.-display (.-style menu)) "none"))))
+
+(defn lat-lng->mgrs [lat lng]
+  (let [zone-num   (+ 1 (js/Math.floor (/ (+ lng 180) 6)))
+        zone-letters "CDEFGHJKLMNPQRSTUVWX"
+        lat-band   (nth zone-letters (js/Math.floor (/ (+ lat 80) 8)) "Z")
+        lat-r      (* lat (/ js/Math.PI 180))
+        lng-r      (* lng (/ js/Math.PI 180))
+        lng0       (* (+ (* (- zone-num 1) 6) -180 3) (/ js/Math.PI 180))
+        a          6378137.0
+        f          (/ 1 298.257223563)
+        b          (* a (- 1 f))
+        e2         (- 1 (* (/ b a) (/ b a)))
+        n          (/ a (js/Math.sqrt (- 1 (* e2 (js/Math.pow (js/Math.sin lat-r) 2)))))
+        t          (js/Math.pow (js/Math.tan lat-r) 2)
+        c          (* (/ e2 (- 1 e2)) (js/Math.pow (js/Math.cos lat-r) 2))
+        aa         (* (js/Math.cos lat-r) (- lng-r lng0))
+        m          (* a (- (* (- 1 (/ e2 4) (/ (* 3 e2 e2) 64)) lat-r)
+                           (* (+ (/ (* 3 e2) 8) (/ (* 3 e2 e2) 32)) (js/Math.sin (* 2 lat-r)))
+                           (* (/ (* 15 e2 e2) 256) (js/Math.sin (* 4 lat-r)))))
+        easting    (+ (* 0.9996 n (+ aa (* aa aa aa (/ (- 1 t c) 6))
+                                     (* aa aa aa aa aa (/ (- 5 (* 18 t) t t (* 72 c)) 120))))
+                      500000)
+        northing   (+ (* 0.9996 (+ m (* n (js/Math.tan lat-r)
+                                       (+ (* aa aa (/ 1 2))
+                                          (* aa aa aa aa (/ (- 5 t (* 9 c)) 24))))))
+                      (if (< lat 0) 10000000 0))
+        e100k      (js/Math.floor (/ easting 100000))
+        n100k      (js/Math.floor (/ northing 100000))
+        e-letters  (nth ["ABCDEFGH" "JKLMNPQR" "STUVWXYZ"] (mod (- zone-num 1) 3) "A")
+        n-letters  (if (odd? zone-num) "ABCDEFGHJKLMNPQRSTUV" "FGHJKLMNPQRSTUVABCDE")
+        e-letter   (nth e-letters (- e100k 1) "A")
+        n-letter   (nth n-letters (mod n100k 20) "A")
+        e5         (js/Math.floor (mod easting 100000))
+        n5         (js/Math.floor (mod northing 100000))
+        pad5       (fn [n] (let [s (str n)] (str (apply str (repeat (- 5 (count s)) "0")) s)))]
+    (str zone-num lat-band " " e-letter n-letter " " (pad5 e5) " " (pad5 n5))))
+
+(defn show-context-menu [x y lat lng]
+  (let [menu     (js/document.getElementById "map-context-menu")
+        mgrs-val (js/document.getElementById "ctx-mgrs-val")
+        dd-val   (js/document.getElementById "ctx-dd-val")
+        mgrs-str (lat-lng->mgrs lat lng)
+        dd-str   (str (.toFixed lat 6) ", " (.toFixed lng 6))]
+    ;; Заповнюємо значення
+    (set! (.-textContent mgrs-val) mgrs-str)
+    (set! (.-textContent dd-val)   dd-str)
+    ;; Позиціонуємо і показуємо
+    (set! (.-left (.-style menu))    (str x "px"))
+    (set! (.-top  (.-style menu))    (str y "px"))
+    (set! (.-display (.-style menu)) "block")
+    ;; Коригуємо якщо виходить за край екрану
+    (let [rect (.getBoundingClientRect menu)
+          vw   (.-innerWidth js/window)
+          vh   (.-innerHeight js/window)]
+      (when (> (.-right rect) vw)
+        (set! (.-left (.-style menu)) (str (- x (.-width rect)) "px")))
+      (when (> (.-bottom rect) vh)
+        (set! (.-top  (.-style menu)) (str (- y (.-height rect)) "px"))))))
+
+(defn setup-context-menu [my-map]
+  (let [menu   (js/document.getElementById "map-context-menu")
+        map-el (js/document.getElementById "map-id")]
+    ;; Правий клік через DOM — надійно в усіх браузерах
+    (.addEventListener map-el "contextmenu"
+      (fn [e]
+        (.preventDefault e)
+        (.stopPropagation e)
+        (let [x   (.-clientX e)
+              y   (.-clientY e)
+              ll  (.mouseEventToLatLng my-map e)
+              lat (.-lat ll)
+              lng (.-lng ll)]
+          (show-context-menu x y lat lng)))
+      false)
+    ;; Клік на MGRS — копіюємо
+    (.addEventListener (js/document.getElementById "ctx-mgrs") "click"
+      (fn [_]
+        (let [val (.-textContent (js/document.getElementById "ctx-mgrs-val"))]
+          (-> (.-clipboard js/navigator) (.writeText val))
+          (set! (.-textContent (js/document.getElementById "ctx-mgrs-val")) "✓ скопійовано!")
+          (js/setTimeout #(set! (.-textContent (js/document.getElementById "ctx-mgrs-val")) val) 1500))
+        (hide-context-menu)))
+    ;; Клік на DD — копіюємо
+    (.addEventListener (js/document.getElementById "ctx-dd") "click"
+      (fn [_]
+        (let [val (.-textContent (js/document.getElementById "ctx-dd-val"))]
+          (-> (.-clipboard js/navigator) (.writeText val))
+          (set! (.-textContent (js/document.getElementById "ctx-dd-val")) "✓ скопійовано!")
+          (js/setTimeout #(set! (.-textContent (js/document.getElementById "ctx-dd-val")) val) 1500))
+        (hide-context-menu)))
+    ;; Будь-який клік або drag — ховаємо меню
+    (.on my-map "click"     (fn [_] (hide-context-menu)))
+    (.on my-map "movestart" (fn [_] (hide-context-menu)))
+    (.addEventListener js/document "keydown"
+      (fn [e] (when (= (.-key e) "Escape") (hide-context-menu))))))
+
 (defn init []
   (let [topo (L/tileLayer "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png" 
                           (clj->js {:maxZoom 17 :attribution "OpenTopoMap"}))
@@ -469,6 +571,7 @@
 
     ;; КРИТИЧНО: Зберігаємо екземпляр карти в атом, щоб інші функції (як flyTo) могли його дістати
     (reset! map-state my-map)
+    (setup-context-menu my-map)
 
     ;; Керування шарами
     (let [base-maps (clj->js {"Топографічна" topo 
@@ -499,21 +602,6 @@
                  lng (.-lng (.-latlng e))]
              (handle-map-click lat lng my-map))))
 
-    ;; Блокуємо стандартне контекстне меню браузера на карті
-    ;; capture=true — перехоплюємо до Leaflet, працює в Chrome/Firefox/Safari/Edge
-    (let [map-el (js/document.getElementById "map-id")]
-      (.addEventListener map-el "contextmenu"
-                         (fn [e] (.preventDefault e) (.stopPropagation e))
-                         true))
-
-    ;; Блокуємо стандартне контекстне меню браузера на карті
-    ;; Працює в Chrome, Firefox, Safari, Edge
-    (let [map-el (js/document.getElementById "map-id")]
-      (.addEventListener map-el "contextmenu"
-                         (fn [e]
-                           (.preventDefault e)
-                           (.stopPropagation e))
-                         true)) ;; capture=true — перехоплюємо до Leaflet
 
     ;; Динамічний радіус кіл при зміні масштабу
     (.on my-map "zoomend"
