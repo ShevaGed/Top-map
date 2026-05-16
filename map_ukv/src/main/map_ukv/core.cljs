@@ -11,6 +11,7 @@
 (defonce rays-group (atom nil)) ; Група для всіх ліній «зірки»
 (defonce legend-ui (atom nil))
 (defonce last-scan-results (atom nil))
+(defonce hill-circles (atom [])) ;; Кола пагорбів для динамічного радіусу
 (defonce boundary-points (atom {}))
 ;; ── Утилітні хелпери ──────────────────────────────────────────────────────
 
@@ -122,6 +123,10 @@
 
 ;; ── Рендеринг режиму рації ────────────────────────────────────────────────
 
+
+(defn hill-radius [zoom]
+  (max 40 (/ 1800 (js/Math.pow 1.6 (- zoom 9)))))
+
 (defn render-zone-rings [lat lng color layer]
   (doseq [zone-km [10 20 30 40 50]]
     (add-to-layer
@@ -141,13 +146,13 @@
     layer))
 
 (defn render-hill-point [pt color layer]
-  (let [lbl (str (js/Math.round (:elev pt)) "м")
-        r   (max 40 (/ 1800 (js/Math.pow 1.6 (- (.getZoom @map-state) 9))))]
-    (add-to-layer
-      (.circle js/L (clj->js [(:lat pt) (:lng pt)])
-               (clj->js {:radius r :color color :fillColor color
-                         :fillOpacity 0.85 :weight 0}))
-      layer)
+  (let [lbl    (str (js/Math.round (:elev pt)) "м")
+        r      (hill-radius (.getZoom @map-state))
+        circle (.circle js/L (clj->js [(:lat pt) (:lng pt)])
+                        (clj->js {:radius r :color color :fillColor color
+                                  :fillOpacity 0.85 :weight 0}))]
+    (add-to-layer circle layer)
+    (swap! hill-circles conj circle)
     (add-to-layer
       (.marker js/L (clj->js [(:lat pt) (:lng pt)])
                (clj->js {:icon (make-elev-label lbl "#4a235a" 6 -10) :interactive false}))
@@ -219,6 +224,7 @@
           (when @radio-marker (.remove @radio-marker))
           (when @radio-layers (.clearLayers @radio-layers))
           (reset! radio-layers (-> (.layerGroup js/L) (.addTo my-map)))
+          (reset! hill-circles [])
           (reset! radio-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon}))
                                    (.addTo my-map))))
         ;; === РЕЖИМ АНТЕНИ: максимум 2, рація не зникає ===
@@ -492,6 +498,13 @@
            (let [lat (.-lat (.-latlng e))
                  lng (.-lng (.-latlng e))]
              (handle-map-click lat lng my-map))))
+
+    ;; Динамічний радіус кіл при зміні масштабу
+    (.on my-map "zoomend"
+         (fn [_]
+           (let [r (hill-radius (.getZoom my-map))]
+             (doseq [circle @hill-circles]
+               (.setRadius circle r)))))
 
     (when-let [dist-input (js/document.getElementById "scan-dist")]
       (set! (.-value dist-input) "50"))
