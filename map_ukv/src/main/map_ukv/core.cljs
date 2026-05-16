@@ -499,6 +499,22 @@
                  lng (.-lng (.-latlng e))]
              (handle-map-click lat lng my-map))))
 
+    ;; Блокуємо стандартне контекстне меню браузера на карті
+    ;; capture=true — перехоплюємо до Leaflet, працює в Chrome/Firefox/Safari/Edge
+    (let [map-el (js/document.getElementById "map-id")]
+      (.addEventListener map-el "contextmenu"
+                         (fn [e] (.preventDefault e) (.stopPropagation e))
+                         true))
+
+    ;; Блокуємо стандартне контекстне меню браузера на карті
+    ;; Працює в Chrome, Firefox, Safari, Edge
+    (let [map-el (js/document.getElementById "map-id")]
+      (.addEventListener map-el "contextmenu"
+                         (fn [e]
+                           (.preventDefault e)
+                           (.stopPropagation e))
+                         true)) ;; capture=true — перехоплюємо до Leaflet
+
     ;; Динамічний радіус кіл при зміні масштабу
     (.on my-map "zoomend"
          (fn [_]
