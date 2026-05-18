@@ -633,8 +633,7 @@
                 btn)))
       (.addTo ruler-ctrl my-map))
 
-    (.on my-map "click" 
-         (.on my-map "click" 
+   (.on my-map "click" 
          (fn [e] 
            (let [latlng (.-latlng e)
                  lat (.-lat latlng)
@@ -644,47 +643,55 @@
                (cond
                  ;; Третій клік: очищаємо все і починаємо заново з першої точки
                  (= (count @ruler-points) 2)
-                 (do
+                 (let [start-dot (js/L.circleMarker latlng (clj->js {:radius 5 :color "red" :fillColor "red" :fillOpacity 1}))]
                    (.clearLayers @ruler-layers)
-                   (reset! ruler-points [latlng]))
+                   (reset! ruler-points [latlng])
+                   (.addLayer @ruler-layers start-dot))
 
-                 ;; Перший клік: просто запам'ятовуємо точку старта
+                 ;; Перший клік: запам'ятовуємо точку старта і малюємо першу цятку
                  (empty? @ruler-points)
-                 (swap! ruler-points conj latlng)
+                 (let [start-dot (js/L.circleMarker latlng (clj->js {:radius 5 :color "red" :fillColor "red" :fillOpacity 1}))]
+                   (swap! ruler-points conj latlng)
+                   (.addLayer @ruler-layers start-dot))
 
-                 ;; Другий клік: малюємо лінію та виводимо відстань
+                 ;; Другий клік: малюємо лінію, другу цятку та виводимо відстань
                  (= (count @ruler-points) 1)
                  (let [p1 (first @ruler-points)
                        p2 latlng
-                       ;; Рахуємо точну відстань між точками в метрах (враховуючи геоїд)
+                       ;; Малюємо другу точку фінішу
+                       end-dot (js/L.circleMarker p2 (clj->js {:radius 5 :color "red" :fillColor "red" :fillOpacity 1}))
+                       
+                       ;; Рахуємо точну відстань
                        dist-m (.distanceTo p1 p2) 
                        dist-str (if (>= dist-m 1000)
                                   (str (.toFixed (/ dist-m 1000) 2) " км")
                                   (str (js/Math.round dist-m) " м"))
-                       ;; Шукаємо середню точку лінії для розміщення підпису
+                       
+                       ;; Середня точка для тексту
                        mid-lat (/ (+ (.-lat p1) (.-lat p2)) 2)
                        mid-lng (/ (+ (.-lng p1) (.-lng p2)) 2)
                        
-                       ;; Створюємо тонку червону лінію
+                       ;; Тонка червона лінія
                        poly (js/L.polyline (clj->js [p1 p2]) (clj->js {:color "red" :weight 2}))
                        
-                       ;; Створюємо чистий текстовий підпис без маркерів
-                       text-icon (.divIcon js/L (clj->js {:className ""
+                       ;; Чистий підпис БЕЗ КВАДРАТИКІВ (прибираємо стилі та фони Leaflet через className "ruler-tooltip")
+                       text-icon (.divIcon js/L (clj->js {:className "ruler-tooltip"
                                                           :html (str "<div style='font-size:12px; font-weight:bold; color:red; "
                                                                      "text-shadow: 0 0 4px white, 0 0 4px white; white-space:nowrap; "
-                                                                     "background: rgba(255,255,255,0.7); padding: 2px 4px; border-radius: 3px; "
-                                                                     "border: 1px solid red;'>"
+                                                                     "background: rgba(255,255,255,0.8); padding: 2px 5px; border-radius: 3px; "
+                                                                     "border: 1px solid red; display: inline-block;'> "
                                                                      dist-str "</div>")
-                                                          :iconAnchor [20 10]}))
+                                                          :iconAnchor [25 10]}))
                        text-marker (js/L.marker (clj->js [mid-lat mid-lng]) (clj->js {:icon text-icon :interactive false}))]
                    
                    (swap! ruler-points conj p2)
-                   ;; Додаємо геометрію в ізольовану групу шарів лінійки
+                   ;; Додаємо всі елементи в групу лінійки
                    (.addLayer @ruler-layers poly)
+                   (.addLayer @ruler-layers end-dot)
                    (.addLayer @ruler-layers text-marker)))
 
                ;; === ЗВИЧАЙНИЙ РЕЖИМ (СТАРА ЛОГІКА) ===
-               (handle-map-click lat lng my-map))))))
+               (handle-map-click lat lng my-map)))))
 
     ;; Динамічний радіус кіл при зміні масштабу
     (.on my-map "zoomend"

@@ -358,3 +358,10 @@ input:checked + .slider:before { transform: translateX(14px); }
     background: #fef3e2 !important;
     border-color: #f39c12 !important;
 }
+
+/* Обнуляємо дефолтні контейнери Leaflet для підпису лінійки */
+.ruler-tooltip {
+    background: none !important;
+    border: none !important;
+    box-shadow: none !important;
+}
