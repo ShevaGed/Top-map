@@ -13,6 +13,9 @@
 (defonce last-scan-results (atom nil))
 (defonce hill-circles (atom [])) ;; Кола пагорбів для динамічного радіусу
 (defonce boundary-points (atom {}))
+(defonce ruler-active? (atom false))   ; Чи увімкнено режим лінійки (тепер глобальний)
+(defonce ruler-points (atom []))       ; Сюди збиратимемо координати [pt1 pt2]
+(defonce ruler-layers (atom nil))      ; Група шарів суто для лінійки та тексту
 ;; ── Утилітні хелпери ──────────────────────────────────────────────────────
 
 (defn get-ui-val
@@ -596,9 +599,11 @@
     (-> (.control.scale js/L (clj->js {:position "bottomright" :metric true :imperial false}))
         (.addTo my-map))
 
+    ;; Ініціалізуємо групу шарів для лінійки та додаємо її на карту
+    (reset! ruler-layers (-> (.layerGroup js/L) (.addTo my-map)))
+
     ;; Один єдиний і правильний контрол лінійки
-    (let [ruler-ctrl (.control js/L (clj->js {:position "topright"}))
-          ruler-active? (atom false)]
+    (let [ruler-ctrl (.control js/L (clj->js {:position "topright"}))]
       (set! (.-onAdd ruler-ctrl)
             (fn [_]
               (let [btn (.createElement js/document "div")]
@@ -607,27 +612,79 @@
                 (set! (.-title btn) "Лінійка — вимірювання відстані")
                 (set! (.-innerHTML btn) "📏")
                 
-                ;; Зупиняємо БУДЬ-ЯКІ події миші, щоб вони не йшли на карту під кнопкою
+                ;; Якщо сторінка перезавантажилась, а атом залишився true — підсвічуємо кнопку
+                (when @ruler-active? (.add (.-classList btn) "active"))
+                
                 (.disableClickPropagation js/L.DomEvent btn)
                 (.disableScrollPropagation js/L.DomEvent btn)
                 
-                ;; Вішаємо звичайний JS-клік безпосередньо на кнопку
                 (.addEventListener btn "click"
                   (fn [e]
                     (.preventDefault e)
-                    (.stopPropagation e) ; Залізобетонний захист від проходження кліку
+                    (.stopPropagation e)
                     (swap! ruler-active? not)
                     (if @ruler-active?
                       (.add (.-classList btn) "active")
-                      (.remove (.-classList btn) "active"))))
+                      (do 
+                        (.remove (.-classList btn) "active")
+                        ;; Умова: при вимкненні кнопки лінійка та текст ОДРАЗУ зникають
+                        (when @ruler-layers (.clearLayers @ruler-layers))
+                        (reset! ruler-points [])))))
                 btn)))
       (.addTo ruler-ctrl my-map))
 
     (.on my-map "click" 
+         (.on my-map "click" 
          (fn [e] 
-           (let [lat (.-lat (.-latlng e))
-                 lng (.-lng (.-latlng e))]
-             (handle-map-click lat lng my-map))))
+           (let [latlng (.-latlng e)
+                 lat (.-lat latlng)
+                 lng (.-lng latlng)]
+             (if @ruler-active?
+               ;; === РЕЖИМ ЛІНІЙКИ ===
+               (cond
+                 ;; Третій клік: очищаємо все і починаємо заново з першої точки
+                 (= (count @ruler-points) 2)
+                 (do
+                   (.clearLayers @ruler-layers)
+                   (reset! ruler-points [latlng]))
+
+                 ;; Перший клік: просто запам'ятовуємо точку старта
+                 (empty? @ruler-points)
+                 (swap! ruler-points conj latlng)
+
+                 ;; Другий клік: малюємо лінію та виводимо відстань
+                 (= (count @ruler-points) 1)
+                 (let [p1 (first @ruler-points)
+                       p2 latlng
+                       ;; Рахуємо точну відстань між точками в метрах (враховуючи геоїд)
+                       dist-m (.distanceTo p1 p2) 
+                       dist-str (if (>= dist-m 1000)
+                                  (str (.toFixed (/ dist-m 1000) 2) " км")
+                                  (str (js/Math.round dist-m) " м"))
+                       ;; Шукаємо середню точку лінії для розміщення підпису
+                       mid-lat (/ (+ (.-lat p1) (.-lat p2)) 2)
+                       mid-lng (/ (+ (.-lng p1) (.-lng p2)) 2)
+                       
+                       ;; Створюємо тонку червону лінію
+                       poly (js/L.polyline (clj->js [p1 p2]) (clj->js {:color "red" :weight 2}))
+                       
+                       ;; Створюємо чистий текстовий підпис без маркерів
+                       text-icon (.divIcon js/L (clj->js {:className ""
+                                                          :html (str "<div style='font-size:12px; font-weight:bold; color:red; "
+                                                                     "text-shadow: 0 0 4px white, 0 0 4px white; white-space:nowrap; "
+                                                                     "background: rgba(255,255,255,0.7); padding: 2px 4px; border-radius: 3px; "
+                                                                     "border: 1px solid red;'>"
+                                                                     dist-str "</div>")
+                                                          :iconAnchor [20 10]}))
+                       text-marker (js/L.marker (clj->js [mid-lat mid-lng]) (clj->js {:icon text-icon :interactive false}))]
+                   
+                   (swap! ruler-points conj p2)
+                   ;; Додаємо геометрію в ізольовану групу шарів лінійки
+                   (.addLayer @ruler-layers poly)
+                   (.addLayer @ruler-layers text-marker)))
+
+               ;; === ЗВИЧАЙНИЙ РЕЖИМ (СТАРА ЛОГІКА) ===
+               (handle-map-click lat lng my-map))))))
 
     ;; Динамічний радіус кіл при зміні масштабу
     (.on my-map "zoomend"
