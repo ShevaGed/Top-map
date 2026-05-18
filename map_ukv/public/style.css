@@ -328,3 +328,33 @@ input:checked + .slider:before { transform: translateX(14px); }
     background: #34495e;
     margin: 2px 0;
 }
+
+/* ── Кнопка лінійки (під перемикачем карт) ─────────────────────────────── */
+.leaflet-ruler-btn {
+    width: 47px !important;
+    height: 47px !important;
+    background: white !important;
+    border-radius: 4px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 20px !important;
+    cursor: pointer !important;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.4) !important;
+    transition: background 0.15s !important;
+    border: 2px solid rgba(0,0,0,0.2) !important;
+    margin-top: 5px !important;
+    box-sizing: border-box !important;
+    
+    /* Дозволяє кнопці перехоплювати кліки в обхід Leaflet */
+    pointer-events: auto !important; 
+}
+
+.leaflet-ruler-btn:hover {
+    background: #f4f4f4 !important;
+}
+
+.leaflet-ruler-btn.active {
+    background: #fef3e2 !important;
+    border-color: #f39c12 !important;
+}

@@ -596,12 +596,38 @@
     (-> (.control.scale js/L (clj->js {:position "bottomright" :metric true :imperial false}))
         (.addTo my-map))
 
+    ;; Один єдиний і правильний контрол лінійки
+    (let [ruler-ctrl (.control js/L (clj->js {:position "topright"}))
+          ruler-active? (atom false)]
+      (set! (.-onAdd ruler-ctrl)
+            (fn [_]
+              (let [btn (.createElement js/document "div")]
+                (set! (.-className btn) "leaflet-ruler-btn")
+                (set! (.-id btn) "ruler-tool-btn")
+                (set! (.-title btn) "Лінійка — вимірювання відстані")
+                (set! (.-innerHTML btn) "📏")
+                
+                ;; Зупиняємо БУДЬ-ЯКІ події миші, щоб вони не йшли на карту під кнопкою
+                (.disableClickPropagation js/L.DomEvent btn)
+                (.disableScrollPropagation js/L.DomEvent btn)
+                
+                ;; Вішаємо звичайний JS-клік безпосередньо на кнопку
+                (.addEventListener btn "click"
+                  (fn [e]
+                    (.preventDefault e)
+                    (.stopPropagation e) ; Залізобетонний захист від проходження кліку
+                    (swap! ruler-active? not)
+                    (if @ruler-active?
+                      (.add (.-classList btn) "active")
+                      (.remove (.-classList btn) "active"))))
+                btn)))
+      (.addTo ruler-ctrl my-map))
+
     (.on my-map "click" 
          (fn [e] 
            (let [lat (.-lat (.-latlng e))
                  lng (.-lng (.-latlng e))]
              (handle-map-click lat lng my-map))))
-
 
     ;; Динамічний радіус кіл при зміні масштабу
     (.on my-map "zoomend"
