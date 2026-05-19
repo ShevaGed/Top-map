@@ -94,6 +94,11 @@
 (defn update-legend-ui [my-map]
   (let [legend-div (js/document.getElementById "dynamic-legend")]
     (when legend-div
+      ;; Налаштовуємо скролл та розміри для самого контейнера легенди
+      (set! (.-style.maxHeight legend-div) "200px")
+      (set! (.-style.overflowY legend-div) "auto")
+      (set! (.-style.width legend-div) "280px")
+      
       (if (empty? @active-antennas)
         (set! (.-innerHTML legend-div) "<div style='text-align:center; padding:5px; color:gray;'>Список антен порожній</div>")
         (let [header "<div style='font-weight:bold; text-align:center; margin-bottom:5px; border-bottom:1px solid #ccc; padding-bottom:3px;'>Активні антени:</div>"
@@ -105,7 +110,6 @@
                              freq  (:freq ant)
                              lat   (:lat ant)
                              lng   (:lng ant)]
-                         ;; Створюємо рядок списку з обробником кліку для переходу
                          (str "<div class='antenna-list-item' style='cursor:pointer; padding:4px; margin-bottom:3px; border-radius:3px; background:rgba(255,255,255,0.9); font-size:11px; display:flex; align-items:center; gap:6px;' "
                               "onclick='let m = map_ukv.core.map_state; if(m) { @m.flyTo([" lat "," lng "], 13); }'>"
                               "<span style='background:" color "; width:10px; height:10px; border-radius:50%; display:inline-block;'></span>"
@@ -413,18 +417,17 @@
         history-body (js/document.getElementById "history-body")]
 
     (when clear-btn
-      (.addEventListener clear-btn "click" 
-                         (fn [] 
+      (.addEventListener clear-btn "click"
+                         (fn []
                            (.clearLayers @rays-group)
                            (doseq [m @markers] (.remove m))
                            (reset! markers [])
-                                              (when @radio-marker (.remove @radio-marker))
+                           (when @radio-marker (.remove @radio-marker))
                            (when @radio-layers (.clearLayers @radio-layers))
                            (reset! radio-marker nil)
                            (reset! radio-layers nil)
-                           (let [legend-div (js/document.getElementById "dynamic-legend")]
-                             (when legend-div
-                               (set! (.-innerHTML legend-div) "Клікніть на карту для розрахунку"))))))
+                           (reset! active-antennas [])
+                           (update-legend-ui @map-state))))
 
     (when export-btn
       (.addEventListener export-btn "click" 
