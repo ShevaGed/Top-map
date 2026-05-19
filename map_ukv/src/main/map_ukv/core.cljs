@@ -94,7 +94,12 @@
 (defn update-legend-ui [my-map]
   (let [legend-div (js/document.getElementById "dynamic-legend")]
     (when legend-div
-      ;; Налаштовуємо скролл та розміри для самого контейнера легенди
+      ;; 1. Дозволяємо крутити коліщатко миші всередині списку (вимикаємо просування скролу на карту)
+      (when js/L
+        (.disableScrollPropagation js/L.DomEvent legend-div)
+        (.disableClickPropagation js/L.DomEvent legend-div))
+      
+      ;; Налаштовуємо стилі контейнера
       (set! (.-style.maxHeight legend-div) "200px")
       (set! (.-style.overflowY legend-div) "auto")
       (set! (.-style.width legend-div) "280px")
@@ -110,8 +115,9 @@
                              freq  (:freq ant)
                              lat   (:lat ant)
                              lng   (:lng ant)]
+                         ;; Повертаємо HTML-рядок для кожної антени
                          (str "<div class='antenna-list-item' style='cursor:pointer; padding:4px; margin-bottom:3px; border-radius:3px; background:rgba(255,255,255,0.9); font-size:11px; display:flex; align-items:center; gap:6px;' "
-                              "onclick='let m = map_ukv.core.map_state; if(m) { @m.flyTo([" lat "," lng "], 13); }'>"
+                              "onclick='if (map_ukv.core.map_state) { (.flyTo @map_ukv.core.map_state (cljs.core/clj->js [" lat "," lng "]), 13); }'>"
                               "<span style='background:" color "; width:10px; height:10px; border-radius:50%; display:inline-block;'></span>"
                               "<span><b>#" (inc idx) "</b> | " freq "MHz | " h1 "м | " mgrs "</span>"
                               "</div>")))
