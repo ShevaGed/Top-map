@@ -16,6 +16,7 @@
 (defonce ruler-active? (atom false))   ; Чи увімкнено режим лінійки (тепер глобальний)
 (defonce ruler-points (atom []))       ; Сюди збиратимемо координати [pt1 pt2]
 (defonce ruler-layers (atom nil))      ; Група шарів суто для лінійки та тексту
+(defonce antenna-colors ["#e74c3c" "#3498db" "#2ecc71" "#f1c40f" "#9b59b6" "#e67e22" "#1abc9c" "#e84393"])
 ;; ── Утилітні хелпери ──────────────────────────────────────────────────────
 
 (defn get-ui-val
@@ -191,18 +192,21 @@
 
 ;; ── Рендеринг звичайного режиму ───────────────────────────────────────────
 
-(defn render-coverage-polygon [lat lng angles angle-map res-clj color]
+(defn render-coverage-polygon [lat lng angles angle-map res-clj color antenna-id]
   (let [edge-points (map-indexed
                       (fn [idx points-info]
                         (let [path (get angle-map (nth angles idx))
                               last-idx (max 0 (dec (count (take-while :visible points-info))))]
                           (nth path last-idx)))
-                      res-clj)]
-    (add-to-layer
-      (L/polygon (clj->js (concat [[lat lng]] edge-points))
-                 (clj->js {:color color :fillColor color
-                           :fillOpacity 0.4 :weight 2 :smoothFactor 1}))
-      @rays-group)))
+                      res-clj)
+        ;; Створюємо полігон Leaflet
+        poly (L/polygon (clj->js (concat [[lat lng]] edge-points))
+                        (clj->js {:color color :fillColor color
+                                  :fillOpacity 0.4 :weight 2 :smoothFactor 1}))]
+    ;; Записуємо ID антени в об'єкт полігону
+    (when antenna-id (aset poly "antenna_id" antenna-id))
+    
+    (add-to-layer poly @rays-group)))
 
 (defn handle-map-click [lat lng my-map]
   (let [h-base     (js/parseFloat (get-ui-val "antenna-height"))
@@ -229,14 +233,7 @@
           (reset! radio-layers (-> (.layerGroup js/L) (.addTo my-map)))
           (reset! hill-circles [])
           (reset! radio-marker (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon}))
-                                   (.addTo my-map))))
-        ;; === РЕЖИМ АНТЕНИ: максимум 2, рація не зникає ===
-        (do
-          (when (>= (count @markers) 2)
-            (.clearLayers @rays-group)
-            (doseq [m @markers] (.remove m))
-            (reset! markers [])
-            (reset! boundary-points {}))))
+                                   (.addTo my-map)))))
 
       (set! (.-display (.-style loader)) "block")
 
@@ -244,9 +241,12 @@
                          (-> (.marker js/L (clj->js [lat lng]) (clj->js {:icon antenna-icon}))
                              (.addTo my-map)))
             _ (when new-marker (swap! markers conj new-marker))
+            _ (when new-marker (aset new-marker "antenna_id" (.now js/Date)))
             marker-id (count @markers)
-            color (if reverse-mode? "#8e44ad"
-                    (if (= marker-id 1) "#3498db" "#e67e22"))
+            color (if reverse-mode? 
+                    "#8e44ad"
+                    (let [color-index (mod (dec marker-id) (count antenna-colors))]
+                      (nth antenna-colors color-index)))
             
             ;; 1. Розрахунок геометрії променів
             angle-map (into {} (map (fn [a] [a (interpolate-points [lat lng] (destination-point lat lng dist-km a) num-points)]) angles))
@@ -300,7 +300,8 @@
                                       (reset! last-scan-results {:lat lat :lng lng :results res-clj
                                                                   :params {:h1 h-base :h2 h-user
                                                                            :dist dist-km :freq freq}})
-                                      (render-coverage-polygon lat lng angles angle-map res-clj color)
+                                      (let [a-id (when new-marker (aget new-marker "antenna_id"))]
+                                        (render-coverage-polygon lat lng angles angle-map res-clj color a-id))
                                       (set! (.-display (.-style loader)) "none")
                                       (update-legend-ui freq h-base h-user reverse-mode?)))
                              (.catch (fn [err]
