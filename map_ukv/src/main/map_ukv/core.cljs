@@ -5,6 +5,8 @@
 (goog-define API-URL "")
 
 (defonce map-state (atom nil))
+(defonce active-antennas (atom [])) ; Поточні додані антени з параметрами
+(declare lat-lng->mgrs)
 (defonce markers (atom [])) ; Маркери антен (максимум 2)
 (defonce radio-marker (atom nil)) ; Маркер рації (тільки один)
 (defonce radio-layers (atom nil)) ; Шар з колами пагорбів для рації
@@ -89,23 +91,29 @@
               (+ lng1 (* fraction (- lng2 lng1)))]))
          (range (inc steps)))))
 
-(defn update-legend-ui [freq h-base h-user reverse-mode?]
-  (let [legend-div (js/document.getElementById "dynamic-legend")
-        mode-label (if reverse-mode? "🔁 Reverse Mode" "📡 Покриття")
-        mode-color (if reverse-mode? "#8e44ad" "#3498db")
-        desc       (if reverse-mode?
-                     (str "Ціль: " h-user "м | Потенційна антена: " h-base "м")
-                     (str "Щогла: " h-base "м | Приймач: " h-user "м"))]
+(defn update-legend-ui [my-map]
+  (let [legend-div (js/document.getElementById "dynamic-legend")]
     (when legend-div
-      (set! (.-innerHTML legend-div) 
-            (str "<div style='text-align:center;'>
-                    <strong style='color:#2c3e50;'>" mode-label "</strong><br>
-                    <div style='margin:5px 0;'>
-                       <span style='background:" mode-color "; color:white; padding:2px 6px; border-radius:3px; font-size:12px; font-weight:bold;'>" 
-                       freq " MHz</span>
-                    </div>
-                    <small style='color:#7f8c8d;'>" desc "</small>
-                  </div>")))))
+      (if (empty? @active-antennas)
+        (set! (.-innerHTML legend-div) "<div style='text-align:center; padding:5px; color:gray;'>Список антен порожній</div>")
+        (let [header "<div style='font-weight:bold; text-align:center; margin-bottom:5px; border-bottom:1px solid #ccc; padding-bottom:3px;'>Активні антени:</div>"
+              rows (map-indexed
+                     (fn [idx ant]
+                       (let [color (:color ant)
+                             mgrs  (:mgrs ant)
+                             h1    (:h1 ant)
+                             freq  (:freq ant)
+                             lat   (:lat ant)
+                             lng   (:lng ant)]
+                         ;; Створюємо рядок списку з обробником кліку для переходу
+                         (str "<div class='antenna-list-item' style='cursor:pointer; padding:4px; margin-bottom:3px; border-radius:3px; background:rgba(255,255,255,0.9); font-size:11px; display:flex; align-items:center; gap:6px;' "
+                              "onclick='let m = map_ukv.core.map_state; if(m) { @m.flyTo([" lat "," lng "], 13); }'>"
+                              "<span style='background:" color "; width:10px; height:10px; border-radius:50%; display:inline-block;'></span>"
+                              "<span><b>#" (inc idx) "</b> | " freq "MHz | " h1 "м | " mgrs "</span>"
+                              "</div>")))
+                     @active-antennas)
+              full-html (str header (apply str rows))]
+          (set! (.-innerHTML legend-div) full-html))))))
 
 (defn validate-params [h-base h-user dist freq]
   (cond
@@ -289,7 +297,7 @@
                            (doseq [pt selected] (render-hill-point pt color @radio-layers))
 
                            (set! (.-display (.-style loader)) "none")
-                           (update-legend-ui freq h-base h-user reverse-mode?))
+                          (update-legend-ui my-map))
 
                          ;; === ЗВИЧАЙНИЙ РЕЖИМ ===
                          (-> (post-json "/check-profile-batch"
@@ -298,12 +306,22 @@
                                          :freq freq :dist dist-m})
                              (.then (fn [res-clj]
                                       (reset! last-scan-results {:lat lat :lng lng :results res-clj
-                                                                  :params {:h1 h-base :h2 h-user
+                                                                 :params {:h1 h-base :h2 h-user
                                                                            :dist dist-km :freq freq}})
                                       (let [a-id (when new-marker (aget new-marker "antenna_id"))]
                                         (render-coverage-polygon lat lng angles angle-map res-clj color a-id))
+                                      
+                                      ;; Зберігаємо дані антени в наш новий атом
+                                      (swap! active-antennas conj {:color color
+                                                                   :mgrs  (lat-lng->mgrs lat lng)
+                                                                   :h1    h-base
+                                                                   :freq  freq
+                                                                   :lat   lat
+                                                                   :lng   lng})
+                                      
                                       (set! (.-display (.-style loader)) "none")
-                                      (update-legend-ui freq h-base h-user reverse-mode?)))
+                                      ;; Викликаємо оновлену функцію з правильним аргументом
+                                      (update-legend-ui my-map)))
                              (.catch (fn [err]
                                        (set! (.-display (.-style loader)) "none")
                                        (js/alert (str "Помилка: " (.-message err)))))))))))))))
